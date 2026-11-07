@@ -1,0 +1,88 @@
+[project]
+name = "minorsafe"
+version = "0.1.0"
+description = "Cost-effectiveness benchmark of methods for age-appropriate LLM responses (baseline, guards, LoRA, activation steering)."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = { text = "MIT" }
+dependencies = [
+    "transformers>=4.45",
+    "accelerate>=0.34",
+    "peft>=0.13",
+    "trl>=0.11",
+    "datasets>=3.0",
+    "huggingface-hub>=0.25",
+    "safetensors>=0.4",
+    "sentencepiece>=0.2",
+    "protobuf>=4.25",
+    "scikit-learn>=1.4",
+    "scipy>=1.11",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "pyarrow>=15",
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "rich>=13.7",
+    "filelock>=3.13",
+    "nvidia-ml-py>=12.535",
+    "textstat>=0.7.3",
+    "wordfreq>=3.1",
+    "nltk>=3.8",
+    "datasketch>=1.6",
+    "bert-score>=0.3.13",
+    "detoxify>=0.5.2",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+]
+
+[project.optional-dependencies]
+# Local / CI: CPU-only torch wheels (small download).
+cpu = ["torch>=2.4"]
+# Remote server: CUDA torch from PyPI + quantization backends.
+gpu = ["torch>=2.4", "bitsandbytes>=0.43"]
+# Fast batched inference for the judge / teacher models (pins its own torch; install on the server only).
+vllm = ["vllm>=0.6.3"]
+dev = ["pytest>=8.0", "pytest-timeout>=2.3", "ruff>=0.6"]
+
+[project.scripts]
+minorsafe = "minorsafe.cli:app"
+
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/minorsafe"]
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "gpu" }], [{ extra = "cpu" }, { extra = "vllm" }]]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", extra = "cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "unit: fast CPU-only tests",
+    "integration: CPU tests with tiny HF models (network on first run)",
+    "gpu: requires a CUDA GPU",
+    "slow: long-running end-to-end tests",
+]
+addopts = "-ra"
+filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning", "ignore::UserWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501", "B008", "UP007"]
+
