@@ -1,0 +1,9 @@
+name: m1_decoder_guard
+kind: guard
+params:
+  guard_arch: decoder
+  guard_model: auto
+  placement: both           # input | output | both
+  action: llm_rewrite       # fallback | regenerate | llm_rewrite | mlm_substitute
+  mlm_model: auto
+  max_regenerations: 2

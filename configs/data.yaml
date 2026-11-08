@@ -1,0 +1,63 @@
+# Dataset sources and synthesis configuration (validated against minorsafe.config.DataSpec)
+
+sources:
+  - name: seed_corpus
+    loader: load_seed_corpus
+    max_items: 500
+    enabled: true
+    purpose: ["safety", "recomposition", "slang", "obfuscated", "over_refusal"]
+
+  - name: toxic_chat
+    loader: load_toxic_chat
+    hf_id: lmsys/toxic-chat
+    config: toxicchat0124
+    split: test
+    max_items: 600
+    enabled: true
+    purpose: ["safety", "guard_eval"]
+
+  - name: beavertails
+    loader: load_beavertails
+    hf_id: PKU-Alignment/BeaverTails
+    split: 30k_test
+    max_items: 600
+    enabled: true
+    purpose: ["safety", "guard_eval"]
+
+  - name: xstest
+    loader: load_xstest
+    hf_id: walledai/XSTest
+    split: test
+    max_items: 450
+    enabled: true
+    purpose: ["over_refusal"]
+
+  - name: asset_simplification
+    loader: load_asset
+    hf_id: facebook/asset
+    config: simplification
+    split: validation
+    max_items: 500
+    enabled: true
+    purpose: ["recomposition", "readability"]
+
+synth_pairs_per_concept: 500
+synth_oversample: 2.5
+concepts:
+  - profanity
+  - lexical_complexity
+  - mature_theme
+  - slang_toxic
+  - slang_benign
+split_ratios:
+  calib: 0.50
+  dev: 0.20
+  test: 0.30
+pair_split_ratios:
+  calib: 0.70
+  dev: 0.15
+  test: 0.15
+obfuscation_per_sentence: 2
+max_minimal_pairs: 2500
+english_min_ratio: 0.60
+seed: 13

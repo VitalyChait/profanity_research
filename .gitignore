@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# MinorSafe benchmark data, artifacts, and results
+data/
+results/
+models_cache/
+*.safetensors
+*.pt

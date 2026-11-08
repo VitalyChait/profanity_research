@@ -1,0 +1,52 @@
+name: gpu_48gb
+description: "Single 48 GB GPU (A40 / L40S / RTX 6000 Ada). Full BF16 inference across S/M/L."
+device: cuda
+min_vram_gb: 40.0
+num_gpus: 1
+allowed_quants: ["bf16", "int8", "nf4", "awq"]
+default_quant: bf16
+batch_size: 16
+max_new_tokens: 256
+generators:
+  - qwen25_05b
+  - qwen25_15b
+  - qwen25_3b
+  - qwen25_7b
+  - deepseek_r1_15b
+  - deepseek_r1_8b
+  - gemma3_270m
+  - gemma3_1b
+  - gemma3_4b
+  - gemma2_9b
+  - llama32_1b
+  - llama32_3b
+  - llama31_8b
+decoder_guards:
+  - qwen3guard_06b
+  - llamaguard3_1b
+  - qwen3guard_4b
+  - llamaguard3_8b
+  - qwen3guard_8b
+encoder_guards:
+  - toxic_bert
+  - roberta_tox
+  - modernbert_base
+  - modernbert_large
+  - eurobert_2b
+  - xlmr_xxl
+encoder_mlms:
+  - modernbert_base_mlm
+  - modernbert_large_mlm
+  - xlmr_large_mlm
+teacher: mistral_small_24b_awq
+teacher_backend: vllm
+lora_large_mode: qlora
+use_vllm: true
+vllm_gpu_memory_utilization: 0.85
+eval:
+  toxicity_backend: detoxify
+  bertscore_model: roberta-large
+  ppl_model: gpt2-large
+  judge_backend: vllm
+  judge_model: mistral_small_24b_awq
+  capability_items: 100

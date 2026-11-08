@@ -1,0 +1,19 @@
+teen_12_18:
+  min_age: 12
+  max_age: 18
+  target_fk_grade: 8.0
+  description: "Adolescents aged 12-18 (middle and high school). Accessible reading level (FK grade <= 8.0), zero profanity or adult harm, natural and respectful teen-friendly tone."
+  disallowed:
+    - profanity
+    - obfuscated
+    - sexual
+    - violence
+    - self_harm
+    - drugs
+    - hate
+    - harassment
+  allowed:
+    - casual_teen_tone
+    - benign_slang
+    - expressive_emojis
+    - educational_redirection

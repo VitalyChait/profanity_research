@@ -1,0 +1,21 @@
+name: quant_grid
+description: "Secondary quantization study (BF16 vs INT8 vs NF4/AWQ) testing transferred vs native steering vectors."
+split: dev
+seeds: [0]
+age_bands: ["teen_12_18"]
+temperature: 0.0
+warmup_queries: 3
+evaluate: true
+capability_eval: false
+runs:
+  - method: m0a_raw
+    generators: ["S", "M", "L"]
+    quants: ["bf16", "int8", "nf4"]
+  - method: m2_lora
+    generators: ["S", "M", "L"]
+    quants: ["bf16", "nf4"]
+  - method: m3_steer_sttp
+    generators: ["S", "M", "L"]
+    quants: ["bf16", "int8", "nf4"]
+    sweep:
+      vector_source_quant: ["native", "bf16"]

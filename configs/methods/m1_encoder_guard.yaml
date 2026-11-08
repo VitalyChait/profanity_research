@@ -1,0 +1,13 @@
+name: m1_encoder_guard
+kind: guard
+params:
+  guard_arch: encoder
+  guard_model: auto
+  train_mode: finetuned     # zeroshot | finetuned
+  n_calib: 200
+  epochs: 2
+  lr: 3.0e-5
+  placement: both           # input | output | both
+  action: mlm_substitute    # fallback | regenerate | llm_rewrite | mlm_substitute
+  mlm_model: auto
+  max_regenerations: 2

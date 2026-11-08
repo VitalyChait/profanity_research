@@ -1,0 +1,362 @@
+# Unified Model Registry (validated against minorsafe.config.ModelSpec)
+
+# ===========================================================================
+# 0. CPU Debug / Smoke Models (tiny random weights for fast CI and smoke runs)
+# ===========================================================================
+tiny_llama:
+  hf_id: hf-internal-testing/tiny-random-LlamaForCausalLM
+  arch: decoder
+  role: generator
+  family: llama
+  size_group: S
+  params_b: 0.01
+  chat_template: false
+  supports_system: true
+  notes: "Tiny random causal LM for CPU unit/integration/smoke tests."
+
+tiny_bert:
+  hf_id: hf-internal-testing/tiny-random-BertForSequenceClassification
+  arch: encoder
+  role: encoder_guard
+  family: bert
+  size_group: S
+  params_b: 0.005
+  chat_template: false
+  notes: "Tiny random encoder classifier for CPU tests."
+
+tiny_mlm:
+  hf_id: hf-internal-testing/tiny-random-BertForMaskedLM
+  arch: encoder
+  role: encoder_mlm
+  family: bert
+  size_group: S
+  params_b: 0.005
+  chat_template: false
+  notes: "Tiny random MLM encoder for CPU recomposition tests."
+
+# ===========================================================================
+# 1. Autoregressive Decoder Generators (4 Families x 3 Scale Tiers: S, M, L)
+# ===========================================================================
+
+# --- Qwen Family (covers <1B, ~1.5B, ~3B, ~7B) ---
+qwen25_05b:
+  hf_id: Qwen/Qwen2.5-0.5B-Instruct
+  arch: decoder
+  role: generator
+  family: qwen
+  size_group: S
+  params_b: 0.49
+  gated: false
+  quant_ids:
+    awq: Qwen/Qwen2.5-0.5B-Instruct-AWQ
+    gptq: Qwen/Qwen2.5-0.5B-Instruct-GPTQ-Int4
+
+qwen25_15b:
+  hf_id: Qwen/Qwen2.5-1.5B-Instruct
+  arch: decoder
+  role: generator
+  family: qwen
+  size_group: M
+  params_b: 1.54
+  gated: false
+  quant_ids:
+    awq: Qwen/Qwen2.5-1.5B-Instruct-AWQ
+    gptq: Qwen/Qwen2.5-1.5B-Instruct-GPTQ-Int4
+
+qwen25_3b:
+  hf_id: Qwen/Qwen2.5-3B-Instruct
+  arch: decoder
+  role: generator
+  family: qwen
+  size_group: M
+  params_b: 3.09
+  gated: false
+  quant_ids:
+    awq: Qwen/Qwen2.5-3B-Instruct-AWQ
+    gptq: Qwen/Qwen2.5-3B-Instruct-GPTQ-Int4
+
+qwen25_7b:
+  hf_id: Qwen/Qwen2.5-7B-Instruct
+  arch: decoder
+  role: generator
+  family: qwen
+  size_group: L
+  params_b: 7.62
+  gated: false
+  quant_ids:
+    awq: Qwen/Qwen2.5-7B-Instruct-AWQ
+    gptq: Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4
+
+# --- DeepSeek Family (S slot is n/a; covers ~1.5B and ~7B-8B reasoning models) ---
+deepseek_r1_15b:
+  hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+  arch: decoder
+  role: generator
+  family: deepseek
+  size_group: M
+  params_b: 1.78
+  gated: false
+  reasoning: true
+  max_new_tokens: 1024
+  notes: "Emits <think>...</think> reasoning chain; counted in tok_generator_reasoning_out."
+
+deepseek_r1_7b:
+  hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+  arch: decoder
+  role: generator
+  family: deepseek
+  size_group: L
+  params_b: 7.62
+  gated: false
+  reasoning: true
+  max_new_tokens: 1024
+
+deepseek_r1_8b:
+  hf_id: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  arch: decoder
+  role: generator
+  family: deepseek
+  size_group: L
+  params_b: 8.03
+  gated: false
+  reasoning: true
+  max_new_tokens: 1024
+
+# --- Gemma Family (covers <1B, ~1B, ~4B, ~9B) ---
+gemma3_270m:
+  hf_id: google/gemma-3-270m-it
+  arch: decoder
+  role: generator
+  family: gemma
+  size_group: S
+  params_b: 0.27
+  gated: true
+  supports_system: false
+
+gemma3_1b:
+  hf_id: google/gemma-3-1b-it
+  arch: decoder
+  role: generator
+  family: gemma
+  size_group: M
+  params_b: 1.00
+  gated: true
+  supports_system: false
+
+gemma3_4b:
+  hf_id: google/gemma-3-4b-it
+  arch: decoder
+  role: generator
+  family: gemma
+  size_group: M
+  params_b: 4.00
+  gated: true
+  supports_system: true
+  notes: "Multimodal checkpoint; get_decoder_layers resolves language_model layers automatically."
+
+gemma2_9b:
+  hf_id: google/gemma-2-9b-it
+  arch: decoder
+  role: generator
+  family: gemma
+  size_group: L
+  params_b: 9.24
+  gated: true
+  supports_system: false
+
+# --- Llama Family (S slot is n/a; covers ~1B, ~3B, ~8B) ---
+llama32_1b:
+  hf_id: meta-llama/Llama-3.2-1B-Instruct
+  arch: decoder
+  role: generator
+  family: llama
+  size_group: M
+  params_b: 1.24
+  gated: true
+
+llama32_3b:
+  hf_id: meta-llama/Llama-3.2-3B-Instruct
+  arch: decoder
+  role: generator
+  family: llama
+  size_group: M
+  params_b: 3.21
+  gated: true
+
+llama31_8b:
+  hf_id: meta-llama/Llama-3.1-8B-Instruct
+  arch: decoder
+  role: generator
+  family: llama
+  size_group: L
+  params_b: 8.03
+  gated: true
+  quant_ids:
+    awq: hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4
+
+# ===========================================================================
+# 2. Autoregressive Decoder Guards (M1-Dec)
+# ===========================================================================
+qwen3guard_06b:
+  hf_id: Qwen/Qwen3Guard-Gen-0.6B
+  arch: decoder
+  role: decoder_guard
+  family: qwen
+  size_group: S
+  params_b: 0.60
+  guard_format: qwen3guard
+
+llamaguard3_1b:
+  hf_id: meta-llama/Llama-Guard-3-1B
+  arch: decoder
+  role: decoder_guard
+  family: llama
+  size_group: M
+  params_b: 1.24
+  gated: true
+  guard_format: llama_guard
+
+qwen3guard_4b:
+  hf_id: Qwen/Qwen3Guard-Gen-4B
+  arch: decoder
+  role: decoder_guard
+  family: qwen
+  size_group: M
+  params_b: 4.00
+  guard_format: qwen3guard
+
+llamaguard3_8b:
+  hf_id: meta-llama/Llama-Guard-3-8B
+  arch: decoder
+  role: decoder_guard
+  family: llama
+  size_group: L
+  params_b: 8.03
+  gated: true
+  guard_format: llama_guard
+
+qwen3guard_8b:
+  hf_id: Qwen/Qwen3Guard-Gen-8B
+  arch: decoder
+  role: decoder_guard
+  family: qwen
+  size_group: L
+  params_b: 8.00
+  guard_format: qwen3guard
+
+# ===========================================================================
+# 3. Bidirectional Encoder Guards & MLM Recomposers (M1-Enc)
+# ===========================================================================
+toxic_bert:
+  hf_id: unitary/toxic-bert
+  arch: encoder
+  role: encoder_guard
+  family: bert
+  size_group: S
+  params_b: 0.11
+  chat_template: false
+  notes: "Pretrained zero-shot toxicity encoder (ramp-up cost = 0)."
+
+roberta_tox:
+  hf_id: s-nlp/roberta_toxicity_classifier
+  arch: encoder
+  role: encoder_guard
+  family: roberta
+  size_group: S
+  params_b: 0.12
+  chat_template: false
+  notes: "Pretrained zero-shot toxicity classifier."
+
+modernbert_base:
+  hf_id: answerdotai/ModernBERT-base
+  arch: encoder
+  role: encoder_guard
+  family: modernbert
+  size_group: S
+  params_b: 0.15
+  chat_template: false
+
+modernbert_large:
+  hf_id: answerdotai/ModernBERT-large
+  arch: encoder
+  role: encoder_guard
+  family: modernbert
+  size_group: S
+  params_b: 0.39
+  chat_template: false
+
+eurobert_2b:
+  hf_id: EuroBERT/EuroBERT-2.1B
+  arch: encoder
+  role: encoder_guard
+  family: eurobert
+  size_group: M
+  params_b: 2.10
+  chat_template: false
+
+xlmr_xxl:
+  hf_id: facebook/xlm-roberta-xxl
+  arch: encoder
+  role: encoder_guard
+  family: xlmr
+  size_group: L
+  params_b: 10.70
+  chat_template: false
+
+modernbert_base_mlm:
+  hf_id: answerdotai/ModernBERT-base
+  arch: encoder
+  role: encoder_mlm
+  family: modernbert
+  size_group: S
+  params_b: 0.15
+  chat_template: false
+
+modernbert_large_mlm:
+  hf_id: answerdotai/ModernBERT-large
+  arch: encoder
+  role: encoder_mlm
+  family: modernbert
+  size_group: M
+  params_b: 0.39
+  chat_template: false
+
+xlmr_large_mlm:
+  hf_id: FacebookAI/xlm-roberta-large
+  arch: encoder
+  role: encoder_mlm
+  family: xlmr
+  size_group: L
+  params_b: 0.56
+  chat_template: false
+
+# ===========================================================================
+# 4. Teacher & Cross-Family LLM Judge Models
+# ===========================================================================
+mistral_small_24b_awq:
+  hf_id: SolidRust/Mistral-Small-24B-Instruct-2501-AWQ
+  arch: decoder
+  role: judge
+  family: mistral
+  size_group: L
+  params_b: 24.0
+  notes: "Cross-family judge outside {Qwen, DeepSeek, Gemma, Llama} to avoid self-preference bias."
+
+gemma2_27b_it:
+  hf_id: google/gemma-2-27b-it
+  arch: decoder
+  role: judge
+  family: gemma
+  size_group: L
+  params_b: 27.2
+  gated: true
+  supports_system: false
+
+llama33_70b_awq:
+  hf_id: hugging-quants/Meta-Llama-3.3-70B-Instruct-AWQ-INT4
+  arch: decoder
+  role: teacher
+  family: llama
+  size_group: L
+  params_b: 70.6
+  gated: true

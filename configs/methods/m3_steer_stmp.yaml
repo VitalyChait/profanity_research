@@ -1,0 +1,11 @@
+name: m3_steer_stmp
+kind: steering
+params:
+  mode: stmp
+  estimator: pca
+  pooling: mean_completion
+  n_calib: 100
+  layer_rel_depth: 0.50
+  concepts:
+    - profanity
+    - lexical_complexity

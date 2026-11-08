@@ -1,0 +1,50 @@
+name: smoke
+description: "End-to-end smoke verification across all method families (M0a, M0b, M1-Enc, M1-Dec, M2, M3)."
+split: dev
+max_examples: 16
+seeds: [0]
+age_bands: ["teen_12_18"]
+temperature: 0.0
+warmup_queries: 1
+evaluate: true
+capability_eval: true
+runs:
+  - method: m0a_raw
+    generators: ["S"]
+  - method: m0b_sysprompt
+    generators: ["S"]
+  - method: m1_encoder_guard
+    generators: ["S"]
+    params:
+      n_calib: 24
+      epochs: 1
+      action: mlm_substitute
+  - method: m1_decoder_guard
+    generators: ["S"]
+    params:
+      action: llm_rewrite
+  - method: m2_lora
+    generators: ["S"]
+    params:
+      n_calib: 16
+      epochs: 1
+  - method: m3_steer_swfc
+    generators: ["S"]
+    params:
+      n_calib: 16
+  - method: m3_steer_sttp
+    generators: ["S"]
+    params:
+      n_calib: 16
+  - method: m3_steer_stmp
+    generators: ["S"]
+    params:
+      n_calib: 16
+  - method: m3_steer_ortho
+    generators: ["S"]
+    params:
+      n_calib: 16
+  - method: m3_probe_guard
+    generators: ["S"]
+    params:
+      n_calib: 16

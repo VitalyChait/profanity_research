@@ -1,0 +1,16 @@
+name: m2_lora
+kind: lora
+params:
+  n_calib: 500
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lr: 2.0e-4
+  epochs: 2
+  batch_size: 4
+  merge_adapter: true
+  concepts:
+    - profanity
+    - lexical_complexity
+    - mature_theme
+    - slang_toxic

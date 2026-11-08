@@ -1,0 +1,14 @@
+name: m3_steer_ortho
+kind: steering
+params:
+  mode: sttp
+  estimator: ortho          # Gram-Schmidt orthogonalized against slang_benign
+  orthogonal_concept: slang_benign
+  pooling: mean_completion
+  n_calib: 100
+  layer_rel_depth: 0.50
+  target_offset_sigma: 0.5
+  concepts:
+    - profanity
+    - lexical_complexity
+    - slang_toxic

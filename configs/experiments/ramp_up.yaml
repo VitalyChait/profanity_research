@@ -1,0 +1,26 @@
+name: ramp_up
+description: "Ramp-up cost curve sweeping N_calib in {25, 50, 100, 500, 2000} across M1-Enc, M2-LoRA, and M3-StTP."
+split: dev
+seeds: [0]
+age_bands: ["teen_12_18"]
+temperature: 0.0
+warmup_queries: 2
+evaluate: true
+capability_eval: false
+runs:
+  - method: m1_encoder_guard
+    generators: ["M", "L"]
+    sweep:
+      n_calib: [25, 50, 100, 500, 2000]
+  - method: m2_lora
+    generators: ["M", "L"]
+    sweep:
+      n_calib: [25, 50, 100, 500, 2000]
+  - method: m3_steer_sttp
+    generators: ["M", "L"]
+    sweep:
+      n_calib: [25, 50, 100, 500, 2000]
+  - method: m3_steer_ortho
+    generators: ["M", "L"]
+    sweep:
+      n_calib: [25, 50, 100, 500, 2000]

@@ -1,0 +1,19 @@
+name: multiturn
+description: "Optional extension (not core): 5-8 turn gradual conversational drift and internal probe early-warning detection."
+split: dev
+max_examples: 60
+seeds: [0]
+age_bands: ["teen_12_18"]
+temperature: 0.0
+warmup_queries: 1
+evaluate: true
+capability_eval: false
+runs:
+  - method: m0a_raw
+    generators: ["M", "L"]
+  - method: m3_steer_swfc
+    generators: ["M", "L"]
+  - method: m3_steer_sttp
+    generators: ["M", "L"]
+  - method: m3_probe_guard
+    generators: ["M", "L"]

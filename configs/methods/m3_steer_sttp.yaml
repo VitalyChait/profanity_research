@@ -1,0 +1,12 @@
+name: m3_steer_sttp
+kind: steering
+params:
+  mode: sttp
+  estimator: pca            # caa | pca
+  pooling: mean_completion
+  n_calib: 100
+  layer_rel_depth: 0.50
+  target_offset_sigma: 0.5
+  concepts:
+    - profanity
+    - lexical_complexity

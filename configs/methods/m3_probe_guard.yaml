@@ -1,0 +1,13 @@
+name: m3_probe_guard
+kind: steering
+params:
+  mode: probe_guard
+  estimator: pca
+  pooling: last_prompt_token
+  n_calib: 100
+  layer_rel_depth: 0.50
+  action: mlm_substitute
+  concepts:
+    - profanity
+    - mature_theme
+    - slang_toxic

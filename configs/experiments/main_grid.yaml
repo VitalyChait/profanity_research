@@ -1,0 +1,46 @@
+name: main_grid
+description: "Core benchmark grid across Qwen, DeepSeek, Gemma, Llama x 3 scale tiers (S, M, L) x M0/M1/M2/M3 for age group 12-18."
+split: test
+seeds: [0, 1, 2]
+age_bands: ["teen_12_18"]
+temperature: 0.7
+warmup_queries: 3
+evaluate: true
+capability_eval: true
+runs:
+  - method: m0a_raw
+    generators: ["*"]
+  - method: m0b_sysprompt
+    generators: ["*"]
+  - method: m1_encoder_guard
+    generators: ["*"]
+    sweep:
+      action: ["fallback", "regenerate", "llm_rewrite", "mlm_substitute"]
+  - method: m1_decoder_guard
+    generators: ["*"]
+    sweep:
+      action: ["fallback", "llm_rewrite"]
+  - method: m2_lora
+    generators: ["*"]
+    params:
+      n_calib: 500
+  - method: m3_steer_swfc
+    generators: ["*"]
+    params:
+      n_calib: 100
+  - method: m3_steer_sttp
+    generators: ["*"]
+    params:
+      n_calib: 100
+  - method: m3_steer_stmp
+    generators: ["*"]
+    params:
+      n_calib: 100
+  - method: m3_steer_ortho
+    generators: ["*"]
+    params:
+      n_calib: 100
+  - method: m3_probe_guard
+    generators: ["*"]
+    params:
+      n_calib: 100

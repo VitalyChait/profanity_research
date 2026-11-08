@@ -1,0 +1,4 @@
+name: m0b_sysprompt
+kind: baseline
+params:
+  use_system_prompt: true

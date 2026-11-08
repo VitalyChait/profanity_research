@@ -1,0 +1,36 @@
+name: recomposition
+description: "Dynamic sentence recomposition study: preserving meaning while replacing profane/complex words for ages 12-18."
+split: test
+categories: ["profanity", "complex_lexicon", "obfuscated"]
+seeds: [0]
+age_bands: ["teen_12_18"]
+temperature: 0.0
+warmup_queries: 2
+evaluate: true
+capability_eval: false
+runs:
+  - method: m0a_raw
+    generators: ["*"]
+  - method: m0b_sysprompt
+    generators: ["*"]
+  - method: m1_encoder_guard
+    generators: ["*"]
+    params:
+      action: mlm_substitute
+    label: m1_enc_mlm_sub
+  - method: m1_encoder_guard
+    generators: ["*"]
+    params:
+      action: llm_rewrite
+    label: m1_enc_llm_rewrite
+  - method: m1_decoder_guard
+    generators: ["*"]
+    params:
+      action: llm_rewrite
+    label: m1_dec_llm_rewrite
+  - method: m2_lora
+    generators: ["*"]
+  - method: m3_steer_sttp
+    generators: ["*"]
+  - method: m3_steer_ortho
+    generators: ["*"]

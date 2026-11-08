@@ -1,0 +1,28 @@
+name: cpu_debug
+description: "Fast CPU profile using tiny random HF models and heuristic/lexicon evaluators for CI and smoke testing."
+device: cpu
+min_vram_gb: 0.0
+num_gpus: 0
+allowed_quants: ["fp32", "bf16"]
+default_quant: fp32
+batch_size: 4
+max_new_tokens: 24
+generators:
+  - tiny_llama
+decoder_guards:
+  - tiny_llama
+encoder_guards:
+  - tiny_bert
+encoder_mlms:
+  - tiny_mlm
+teacher: tiny_llama
+teacher_backend: mock
+lora_large_mode: lora
+use_vllm: false
+eval:
+  toxicity_backend: lexicon
+  bertscore_model: null
+  ppl_model: null
+  judge_backend: heuristic
+  judge_model: null
+  capability_items: 12
