@@ -67,4 +67,3 @@ class GPUSampler:
             self._thread.join(timeout=2)
         if torch.cuda.is_available():
             self.peak_mem_mb = max(self.peak_mem_mb, torch.cuda.max_memory_allocated() / 2**20)
-

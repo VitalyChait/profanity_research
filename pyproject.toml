@@ -68,10 +68,11 @@ explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 markers = [
     "unit: fast CPU-only tests",
     "integration: CPU tests with tiny HF models (network on first run)",
+    "smoke: full end-to-end smoke pipeline tests",
     "gpu: requires a CUDA GPU",
     "slow: long-running end-to-end tests",
 ]

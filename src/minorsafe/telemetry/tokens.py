@@ -45,4 +45,3 @@ class TokenUsage:
         d[f"{prefix}output_total"] = self.output_total
         d[f"{prefix}total"] = self.total
         return d
-

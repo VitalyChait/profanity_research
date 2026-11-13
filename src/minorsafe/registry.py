@@ -209,4 +209,3 @@ def free_model(*objs) -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-

@@ -15,4 +15,3 @@ __all__ = [
     "cuda_sync",
     "efficiency",
 ]
-

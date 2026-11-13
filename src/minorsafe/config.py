@@ -109,7 +109,7 @@ class DataSpec(StrictModel):
     sources: list[SourceSpec] = []
     synth_pairs_per_concept: int = 600
     synth_oversample: float = 3.0
-    concepts: list[str] = ["profanity", "lexical_complexity", "mature_theme", "slang_toxic"]
+    concepts: list[str] = ["profanity", "lexical_complexity", "mature_theme", "slang_toxic", "slang_benign"]
     split_ratios: dict[str, float] = {"calib": 0.5, "dev": 0.2, "test": 0.3}
     pair_split_ratios: dict[str, float] = {"calib": 0.7, "dev": 0.15, "test": 0.15}
     obfuscation_per_sentence: int = 2

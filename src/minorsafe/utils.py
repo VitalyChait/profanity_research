@@ -23,7 +23,9 @@ def get_logger(name: str = "minorsafe") -> logging.Logger:
     logger = logging.getLogger(name)
     if not logging.getLogger("minorsafe").handlers:
         handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s | %(message)s", "%H:%M:%S"))
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s | %(message)s", "%H:%M:%S")
+        )
         root = logging.getLogger("minorsafe")
         root.addHandler(handler)
         root.setLevel(os.environ.get("MINORSAFE_LOGLEVEL", "INFO"))
@@ -73,7 +75,9 @@ def git_sha() -> str:
         return "unknown"
 
 
-def package_versions(names: tuple[str, ...] = ("torch", "transformers", "peft", "trl", "datasets", "vllm")) -> dict:
+def package_versions(
+    names: tuple[str, ...] = ("torch", "transformers", "peft", "trl", "datasets", "vllm"),
+) -> dict:
     from importlib.metadata import PackageNotFoundError, version
 
     out = {}
@@ -118,4 +122,3 @@ def extract_json_object(text: str) -> dict | None:
                     break
         start = text.find("{", start + 1)
     return None
-

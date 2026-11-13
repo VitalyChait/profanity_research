@@ -95,4 +95,3 @@ class TimingLogitsProcessor:
         n = (n_tokens if n_tokens is not None else self.n_steps) - 1
         dt = self.decode_seconds()
         return n / dt if dt > 0 and n > 0 else float("nan")
-

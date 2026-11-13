@@ -1,7 +1,7 @@
 """Token- and time-based cost model (no currency - convert prices externally).
 
-    Time(N)   = T_setup + N * mean(T_query)
-    Tokens(N) = K_setup + N * mean(K_query)
+Time(N)   = T_setup + N * mean(T_query)
+Tokens(N) = K_setup + N * mean(K_query)
 """
 
 from __future__ import annotations
@@ -101,9 +101,10 @@ def break_even(setup_a: float, per_query_a: float, setup_b: float, per_query_b: 
 
 def efficiency(success_rate: float, tokens_per_query: float, seconds_per_query: float) -> dict:
     return {
-        "success_per_1k_tokens": 1000.0 * success_rate / tokens_per_query if tokens_per_query > 0 else math.nan,
+        "success_per_1k_tokens": 1000.0 * success_rate / tokens_per_query
+        if tokens_per_query > 0
+        else math.nan,
         "success_per_gpu_s": success_rate / seconds_per_query if seconds_per_query > 0 else math.nan,
         "tokens_per_success": tokens_per_query / success_rate if success_rate > 0 else math.inf,
         "seconds_per_success": seconds_per_query / success_rate if success_rate > 0 else math.inf,
     }
-

@@ -87,7 +87,9 @@ class ChatGenerator:
         self.model = model
         self.tok = tokenizer
         self.spec = spec
-        self.max_new_tokens = (spec.max_new_tokens if spec and spec.max_new_tokens else None) or max_new_tokens
+        self.max_new_tokens = (
+            spec.max_new_tokens if spec and spec.max_new_tokens else None
+        ) or max_new_tokens
         self.temperature = temperature
         self.top_p = top_p
         self.min_new_tokens = min_new_tokens
@@ -183,4 +185,3 @@ class ChatGenerator:
                 )
             )
         return results
-

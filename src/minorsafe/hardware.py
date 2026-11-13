@@ -90,4 +90,3 @@ def gpu_is_exclusive(device_index: int = 0) -> bool:
         return all(p.pid == me for p in procs)
     except Exception:
         return True
-
