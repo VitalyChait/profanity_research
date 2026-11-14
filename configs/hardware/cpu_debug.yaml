@@ -19,6 +19,8 @@ teacher: tiny_llama
 teacher_backend: mock
 lora_large_mode: lora
 use_vllm: false
+# Debug-only: lets placeholder guards/judge/PPL/LoRA run. Never enable on profiles used for reported results.
+allow_placeholders: true
 eval:
   toxicity_backend: lexicon
   bertscore_model: null

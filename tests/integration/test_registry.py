@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch.nn as nn
-from conftest import DummyCausalLM
+from minorsafe.testing import DummyCausalLM
 
 from minorsafe.registry import compute_dtype, free_model, get_decoder_layers
 

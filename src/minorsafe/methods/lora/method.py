@@ -1,21 +1,40 @@
-"""M2 LoRA / QLoRA fine-tuning and inference method (Phase 5.3)."""
+"""M2 LoRA / QLoRA fine-tuning and inference method (Phase 5.3).
+
+PLACEHOLDER: the current trainer is NOT PEFT LoRA (it fine-tunes the last two parameter tensors on a
+handful of pairs without prompt masking). It is gated by ``require_real_backend`` so it can only run on
+profiles with ``allow_placeholders: true``. Replace with a PEFT LoRA/QLoRA trainer (plan §5.3).
+"""
 
 from __future__ import annotations
 
+import copy
+
 import torch
 
-from minorsafe.data.lexicons import replace_complex_words, replace_profanity
 from minorsafe.data.schema import Example
-from minorsafe.generation import format_chat
+from minorsafe.generation import ChatGenerator, format_chat
 from minorsafe.methods.base import MethodOutput, ResponseMethod, RunContext
+from minorsafe.placeholders import require_real_backend
 from minorsafe.telemetry.cost import SetupReport
 from minorsafe.telemetry.tokens import TokenUsage
 
 
 class LoRAResponseMethod(ResponseMethod):
     def setup(self, ctx: RunContext) -> SetupReport:
+        require_real_backend(
+            ctx.hardware, "M2 LoRA trainer", "not PEFT LoRA: trains last 2 tensors, <=16 pairs, no prompt masking"
+        )
         self._init_generator(ctx)
         assert self.model is not None and self.tokenizer is not None
+        if not self._owns_model:
+            # Never mutate a shared preloaded model in place: later runs would inherit the trained weights.
+            self.model = copy.deepcopy(self.model)
+            self.generator = ChatGenerator(
+                self.model,
+                self.tokenizer,
+                spec=ctx.generator_spec,
+                max_new_tokens=ctx.hardware.max_new_tokens,
+            )
         n_calib = int(self.spec.params.get("n_calib", 50))
         epochs = int(self.spec.params.get("epochs", 1))
         lr = float(self.spec.params.get("lr", 2.0e-4))
@@ -67,8 +86,7 @@ class LoRAResponseMethod(ResponseMethod):
                 generator_out=gr.n_out,
                 generator_reasoning_out=gr.n_reasoning,
             )
-            cleaned, _ = replace_profanity(gr.text)
-            cleaned, _ = replace_complex_words(cleaned)
+            cleaned, n_filtered = self.apply_post_filter(gr.text)
             e2e_ms = max(0.01, gr.e2e_s * 1000.0 / max(1, len(batch)))
             eff_tok_s = max(1, gr.n_out) / (e2e_ms / 1000.0)
             outputs.append(
@@ -85,6 +103,7 @@ class LoRAResponseMethod(ResponseMethod):
                     if gr.decode_tok_per_s == gr.decode_tok_per_s
                     else eff_tok_s,
                     effective_tok_per_s=eff_tok_s,
+                    extra={"post_filter_replacements": n_filtered} if self.post_filter else {},
                 )
             )
         return outputs

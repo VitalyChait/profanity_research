@@ -124,19 +124,32 @@ def calibrate_hyperplane_from_activations(
     )
 
 
+def _encode_prompt_completion(tokenizer, prompt: str, completion: str) -> tuple[list[int], int]:
+    """Return (input_ids, n_prompt_tokens) with exact prompt/completion boundary alignment.
+
+    The prompt (chat-formatted, incl. generation prefix) and the completion are tokenized separately and
+    concatenated at the token-ID level, so the completion slice starts exactly at ``n_prompt_tokens`` and no
+    artificial separator is inserted between the generation prefix and the completion.
+    """
+    prefix_str = format_chat(tokenizer, [{"role": "user", "content": prompt}])
+    prefix_ids = list(tokenizer(prefix_str, add_special_tokens=False)["input_ids"])
+    comp_ids = list(tokenizer(completion, add_special_tokens=False)["input_ids"])
+    return prefix_ids + comp_ids, len(prefix_ids)
+
+
 @torch.no_grad()
-def capture_pair_activations(
+def pooled_activations(
     model,
     tokenizer,
-    pairs: list[ContrastivePair],
+    prompt: str,
+    completion: str,
     layer_indices: list[int],
     pooling: str = "mean_completion",
-) -> tuple[dict[int, tuple[np.ndarray, np.ndarray]], int]:
-    """Capture (X_pos, X_neg) activations for all requested layers in one pass per completion."""
+) -> tuple[dict[int, np.ndarray], int]:
+    """Run one forward pass over (prompt, completion) and return pooled activations per layer + token count."""
     layers = get_decoder_layers(model)
     cache: dict[int, torch.Tensor] = {}
     handles = []
-
     for l_idx in layer_indices:
 
         def _make_hook(idx: int):
@@ -148,38 +161,53 @@ def capture_pair_activations(
 
         handles.append(layers[l_idx].register_forward_hook(_make_hook(l_idx)))
 
-    pos_by_layer: dict[int, list[np.ndarray]] = {l_idx: [] for l_idx in layer_indices}
-    neg_by_layer: dict[int, list[np.ndarray]] = {l_idx: [] for l_idx in layer_indices}
-    total_tokens = 0
-    dev = next(model.parameters()).device
-
-    def _pool_sequence(text_prompt: str, text_comp: str, dest: dict[int, list[np.ndarray]]) -> int:
-        prefix_str = format_chat(tokenizer, [{"role": "user", "content": text_prompt}])
-        full_str = f"{prefix_str} {text_comp}"
-        prefix_ids = tokenizer(prefix_str, add_special_tokens=False)["input_ids"]
-        enc = tokenizer(full_str, return_tensors="pt", add_special_tokens=False).to(dev)
-        n_tok = int(enc["input_ids"].shape[1])
-        model(**enc)
-        start = min(len(prefix_ids), max(0, n_tok - 1))
-        for l_idx in layer_indices:
-            h = cache[l_idx][0]  # [seq_len, hidden_dim]
-            if pooling == "last_prompt_token":
-                pos_idx = max(0, len(prefix_ids) - 1)
-                vec = h[min(pos_idx, h.shape[0] - 1)]
-            elif pooling == "last_completion_token":
-                vec = h[-1]
-            else:
-                vec = h[start:].mean(dim=0)
-            dest[l_idx].append(vec.cpu().float().numpy())
-        return n_tok
-
     try:
-        for p in pairs:
-            total_tokens += _pool_sequence(p.prompt, p.positive, pos_by_layer)
-            total_tokens += _pool_sequence(p.prompt, p.negative, neg_by_layer)
+        ids, n_prompt = _encode_prompt_completion(tokenizer, prompt, completion)
+        dev = next(model.parameters()).device
+        input_ids = torch.tensor([ids], dtype=torch.long, device=dev)
+        model(input_ids=input_ids)
     finally:
         for h in handles:
             h.remove()
+
+    n_tok = len(ids)
+    start = min(n_prompt, max(0, n_tok - 1))
+    out: dict[int, np.ndarray] = {}
+    for l_idx in layer_indices:
+        h = cache[l_idx][0]  # [seq_len, hidden_dim]
+        if pooling == "last_prompt_token":
+            vec = h[min(max(0, n_prompt - 1), h.shape[0] - 1)]
+        elif pooling == "last_completion_token":
+            vec = h[-1]
+        elif pooling == "mean_completion":
+            vec = h[start:].mean(dim=0)
+        else:
+            raise ValueError(f"Unknown pooling mode: {pooling!r}")
+        out[l_idx] = vec.cpu().float().numpy()
+    return out, n_tok
+
+
+@torch.no_grad()
+def capture_pair_activations(
+    model,
+    tokenizer,
+    pairs: list[ContrastivePair],
+    layer_indices: list[int],
+    pooling: str = "mean_completion",
+) -> tuple[dict[int, tuple[np.ndarray, np.ndarray]], int]:
+    """Capture (X_pos, X_neg) activations for all requested layers in one pass per completion."""
+    if not pairs:
+        raise ValueError("capture_pair_activations requires at least one contrastive pair")
+    pos_by_layer: dict[int, list[np.ndarray]] = {l_idx: [] for l_idx in layer_indices}
+    neg_by_layer: dict[int, list[np.ndarray]] = {l_idx: [] for l_idx in layer_indices}
+    total_tokens = 0
+
+    for p in pairs:
+        for completion, dest in ((p.positive, pos_by_layer), (p.negative, neg_by_layer)):
+            acts, n_tok = pooled_activations(model, tokenizer, p.prompt, completion, layer_indices, pooling)
+            total_tokens += n_tok
+            for l_idx, vec in acts.items():
+                dest[l_idx].append(vec)
 
     out = {l_idx: (np.vstack(pos_by_layer[l_idx]), np.vstack(neg_by_layer[l_idx])) for l_idx in layer_indices}
     return out, total_tokens
@@ -209,19 +237,27 @@ def extract_steering_directions(
         nuisance_by_layer: dict[int, np.ndarray] = {}
         if estimator == "ortho" and orthogonal_concept:
             slang_pairs = [p for p in pairs if p.concept == orthogonal_concept][:n_calib]
-            if slang_pairs:
-                slang_acts, tok_s = capture_pair_activations(
-                    model, tokenizer, slang_pairs, layer_indices=layer_indices, pooling=pooling
+            if not slang_pairs:
+                raise ValueError(
+                    f"estimator='ortho' needs calibration pairs for {orthogonal_concept!r}; none found. "
+                    "Refusing to silently degrade to non-orthogonalized steering."
                 )
-                st.tokens += tok_s
-                for l_idx, (xp, xn) in slang_acts.items():
-                    nuisance_by_layer[l_idx] = _compute_raw_direction(xp, xn, estimator="pca")
+            slang_acts, tok_s = capture_pair_activations(
+                model, tokenizer, slang_pairs, layer_indices=layer_indices, pooling=pooling
+            )
+            st.tokens += tok_s
+            for l_idx, (xp, xn) in slang_acts.items():
+                nuisance_by_layer[l_idx] = _compute_raw_direction(xp, xn, estimator="pca")
 
         chosen_directions: list[ConceptDirection] = []
         for concept in concepts:
-            c_pairs = [p for p in pairs if p.concept == concept][:n_calib] or pairs[
-                : max(2, min(8, len(pairs)))
-            ]
+            c_pairs = [p for p in pairs if p.concept == concept][:n_calib]
+            if not c_pairs:
+                available = sorted({p.concept for p in pairs})
+                raise ValueError(
+                    f"No calibration pairs for steering concept {concept!r} (available: {available}). "
+                    "Refusing to fall back to other concepts' pairs, which would mislabel the direction."
+                )
             acts, tok_c = capture_pair_activations(
                 model, tokenizer, c_pairs, layer_indices=layer_indices, pooling=pooling
             )

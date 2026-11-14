@@ -40,10 +40,11 @@ class BaselineMethod(ResponseMethod):
             e2e_ms = max(0.01, gr.e2e_s * 1000.0 / max(1, len(batch)))
             ttft_ms = max(0.0, gr.ttft_s * 1000.0)
             eff_tok_s = (gr.n_out / (e2e_ms / 1000.0)) if e2e_ms > 0 else 0.0
+            final_text, n_filtered = self.apply_post_filter(gr.text)
             outputs.append(
                 MethodOutput(
                     example_id=ex.id,
-                    text=gr.text,
+                    text=final_text,
                     raw_text=gr.raw_text,
                     blocked=False,
                     action_taken="sysprompt" if use_sys else "none",
@@ -54,6 +55,7 @@ class BaselineMethod(ResponseMethod):
                     if gr.decode_tok_per_s == gr.decode_tok_per_s
                     else eff_tok_s,
                     effective_tok_per_s=eff_tok_s,
+                    extra={"post_filter_replacements": n_filtered} if self.post_filter else {},
                 )
             )
         return outputs

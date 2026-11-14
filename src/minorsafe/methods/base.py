@@ -43,8 +43,9 @@ class MethodOutput:
     e2e_ms: float = 0.0
     decode_tok_per_s: float = 0.0
     effective_tok_per_s: float = 0.0
-    energy_j: float = 0.0
-    peak_vram_mb: float = 0.0
+    # NaN = not measured (GPUSampler not yet wired). Never report fake zeros.
+    energy_j: float = float("nan")
+    peak_vram_mb: float = float("nan")
     extra: dict = field(default_factory=dict)
 
 
@@ -57,6 +58,19 @@ class ResponseMethod(ABC):
         self.tokenizer = None
         self.generator: ChatGenerator | None = None
         self._owns_model = False
+        # Opt-in lexicon post-filter. OFF by default so the measured effect is the method's own.
+        # Enable only for an explicitly named hybrid arm (and pair it with an M0a + post_filter control).
+        self.post_filter: bool = bool(spec.params.get("post_filter", False))
+
+    def apply_post_filter(self, text: str) -> tuple[str, int]:
+        """Apply the lexicon profanity/complex-word replacement iff ``post_filter`` is enabled."""
+        if not self.post_filter:
+            return text, 0
+        from minorsafe.data.lexicons import replace_complex_words, replace_profanity
+
+        cleaned, n1 = replace_profanity(text)
+        cleaned, n2 = replace_complex_words(cleaned)
+        return cleaned, int(n1) + int(n2)
 
     def _init_generator(self, ctx: RunContext) -> None:
         self.ctx = ctx

@@ -159,7 +159,7 @@ def run_experiment(
 
 def run_smoke_pipeline(work_dir: Path, max_examples: int = 6) -> pd.DataFrame:
     """Fast, offline CPU smoke pipeline exercising data -> methods -> eval -> analysis."""
-    from conftest import DummyCausalLM, DummyTokenizer
+    from minorsafe.testing import DummyCausalLM, DummyTokenizer
 
     from minorsafe.analysis.aggregate import aggregate_experiment_results
     from minorsafe.analysis.plots import generate_all_figures

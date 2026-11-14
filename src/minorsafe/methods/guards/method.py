@@ -1,4 +1,10 @@
-"""External Guardrails (M1-Enc Bidirectional Encoder & M1-Dec Autoregressive Decoder)."""
+"""External Guardrails (M1-Enc Bidirectional Encoder & M1-Dec Autoregressive Decoder).
+
+PLACEHOLDER: no encoder or decoder guard model is loaded yet. Scoring is a lexicon heuristic blended with a
+hashing-vectorizer logistic regression, and encoder vs decoder differ only in token bookkeeping. Gated by
+``require_real_backend`` (only ``allow_placeholders`` profiles may run it). See plan §5.2 for the real
+ModernBERT / toxic-bert / Llama-Guard-3 / Qwen3Guard implementations.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +20,7 @@ from minorsafe.data.schema import Example
 from minorsafe.eval.detection import calibrate_f1_threshold
 from minorsafe.methods.actions import execute_moderation_action
 from minorsafe.methods.base import MethodOutput, ResponseMethod, RunContext
+from minorsafe.placeholders import require_real_backend
 from minorsafe.telemetry.cost import SetupReport
 from minorsafe.telemetry.tokens import TokenUsage
 
@@ -30,6 +37,11 @@ class GuardResponseMethod(ResponseMethod):
         self._clf: LogisticRegression | None = None
 
     def setup(self, ctx: RunContext) -> SetupReport:
+        require_real_backend(
+            ctx.hardware,
+            f"M1 {self.guard_arch} guard",
+            "lexicon + hashing-vectorizer scorer; no guard model is loaded",
+        )
         self._init_generator(ctx)
         n_calib = int(self.spec.params.get("n_calib", 100))
         rep = SetupReport(
@@ -51,9 +63,14 @@ class GuardResponseMethod(ResponseMethod):
                     X = self._vec.transform(texts)
                     self._clf = LogisticRegression(C=1.0, random_state=13)
                     self._clf.fit(X, labels)
-                    scores = self._clf.predict_proba(X)[:, 1]
-                    self.threshold = calibrate_f1_threshold(labels, scores)
                 st.tokens = sum(len(t.split()) for t in texts)
+
+        # Threshold is calibrated on held-out dev prompts (never on the training data).
+        dev = [e for e in ctx.dev_examples if e.label_unsafe is not None]
+        dev_labels = [int(bool(e.label_unsafe)) for e in dev]
+        if len(set(dev_labels)) >= 2:
+            dev_scores = [self._score_text(e.last_user)[0] for e in dev]
+            self.threshold = calibrate_f1_threshold(dev_labels, dev_scores)
         return rep
 
     def _score_text(self, text: str) -> tuple[float, int]:
@@ -88,8 +105,8 @@ class GuardResponseMethod(ResponseMethod):
                 tok.guard_in += in_toks
                 tok.guard_out += 4
 
-            # Input guard check on severely harmful prompts
-            if self.placement in ("input", "both") and ex.label_unsafe and in_score >= self.threshold:
+            # Input guard: decided by the guard score alone (ground-truth labels are never consulted).
+            if self.placement in ("input", "both") and in_score >= self.threshold:
                 fallback_msg = (self.ctx.prompts.get("fallback_responses") or {}).get(
                     age_band,
                     "I can't help with that request, let's explore a safe topic instead!",
@@ -138,9 +155,11 @@ class GuardResponseMethod(ResponseMethod):
                     prompts=self.ctx.prompts,
                     age_band=age_band,
                     seed=seed,
+                    is_unsafe=lambda t: self._score_text(t)[0] >= self.threshold,
                 )
                 tok = tok + extra_tok
 
+            final_text, n_filtered = self.apply_post_filter(final_text)
             e2e_ms = max(0.05, (time.perf_counter() - t0) * 1000.0)
             eff_tok_s = max(1, len(final_text.split())) / (e2e_ms / 1000.0)
             outputs.append(
@@ -158,6 +177,7 @@ class GuardResponseMethod(ResponseMethod):
                     if gr.decode_tok_per_s == gr.decode_tok_per_s
                     else eff_tok_s,
                     effective_tok_per_s=eff_tok_s,
+                    extra={"post_filter_replacements": n_filtered} if self.post_filter else {},
                 )
             )
         return outputs

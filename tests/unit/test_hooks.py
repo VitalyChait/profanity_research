@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 import torch
-from conftest import DummyCausalLM
+from minorsafe.testing import DummyCausalLM
 from minorsafe.methods.steering.hooks import ConceptDirection, ResidualSteeringHook
 
 pytestmark = pytest.mark.unit
