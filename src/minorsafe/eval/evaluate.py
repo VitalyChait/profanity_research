@@ -104,4 +104,3 @@ def evaluate_responses_df(
         evaluated.append(merged)
 
     return pd.DataFrame(evaluated)
-

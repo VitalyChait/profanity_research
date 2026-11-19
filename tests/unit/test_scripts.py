@@ -35,4 +35,3 @@ def test_download_models_dry_run():
     )
     assert res.returncode == 0, res.stderr
     assert "tiny_llama" in res.stdout
-

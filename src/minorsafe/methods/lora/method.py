@@ -22,7 +22,9 @@ from minorsafe.telemetry.tokens import TokenUsage
 class LoRAResponseMethod(ResponseMethod):
     def setup(self, ctx: RunContext) -> SetupReport:
         require_real_backend(
-            ctx.hardware, "M2 LoRA trainer", "not PEFT LoRA: trains last 2 tensors, <=16 pairs, no prompt masking"
+            ctx.hardware,
+            "M2 LoRA trainer",
+            "not PEFT LoRA: trains last 2 tensors, <=16 pairs, no prompt masking",
         )
         self._init_generator(ctx)
         assert self.model is not None and self.tokenizer is not None

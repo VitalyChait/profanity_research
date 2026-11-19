@@ -44,7 +44,7 @@ minorsafe smoke
 
 ```bash
 bash scripts/run_phase.sh data
-# Equivalent: minorsafe data
+# Equivalent: minorsafe data build (or make data)
 ```
 
 ## 4. Running Experiments
@@ -80,9 +80,6 @@ bash scripts/run_phase.sh analyze
 
 ## Known Repo Gotchas
 
-- **Broken `Makefile` targets (do not use)**:
-  - `make smoke` passes `--hardware cpu_debug` (invalid flag for `minorsafe smoke`). Use `minorsafe smoke`.
-  - `make data` runs `minorsafe data build --hardware auto` (invalid subcommand/flag). Use `minorsafe data` or `bash scripts/run_phase.sh data`.
-  - `make main` invokes `rampup`, `guards`, `main`, `subculture`, which do not exist in `scripts/run_phase.sh`.
-- **Fail-closed placeholder guard (`src/minorsafe/placeholders.py`)**: GPU profiles set `allow_placeholders: false` (default). Running `capability_eval` (`main_grid.yaml`) or placeholder-backed methods (`m1_encoder_guard`, `m2_lora`, `mlm_substitute` action) raises `PlaceholderBackendError` until real GPU implementations replace those placeholders.
+- **Aligned `Makefile` / CLI / `run_phase.sh` targets**: `make smoke`, `make data`, `make main`, and `scripts/run_phase.sh` phase aliases (`rampup`/`ramp_up`, `guards`, `main`/`main_grid`, `recomposition`, `subculture`/`subculture_audit`, `quant`/`quant_grid`, `multiturn`, `analyze`) are aligned and verified by `tests/unit/test_cli_entrypoints.py`. Notice `setup_server.sh` now also runs `uv sync --extra gpu --extra vllm --extra dev`, and `scripts/slurm/run_grid.sbatch` maps tasks `0-5` across the benchmark phases.
+- **Fail-closed placeholder guard (`src/minorsafe/placeholders.py`)**: GPU profiles set `allow_placeholders: false` (default). Running `capability_eval` (`main_grid.yaml`) or placeholder-backed methods (`m1_encoder_guard`, `m1_decoder_guard`, `m2_lora`, `mlm_substitute` action) or `eval` with `judge_backend: vllm|hf` / `ppl_model` raises `PlaceholderBackendError` until real GPU implementations replace those placeholders.
 

@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch.nn as nn
-from minorsafe.testing import DummyCausalLM
 
 from minorsafe.registry import compute_dtype, free_model, get_decoder_layers
+from minorsafe.testing import DummyCausalLM
 
 pytestmark = pytest.mark.integration
 

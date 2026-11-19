@@ -120,7 +120,9 @@ def run_experiment(
     if exp.capability_eval:
         # Capability retention (tinyMMLU / tinyGSM8K) is not wired into the runner yet; do not let the
         # config flag silently do nothing on profiles used for reported results.
-        require_real_backend(profile, "capability_eval", "tinyMMLU/tinyGSM8K retention is not wired into the runner")
+        require_real_backend(
+            profile, "capability_eval", "tinyMMLU/tinyGSM8K retention is not wired into the runner"
+        )
 
     batch_size = max(1, int(exp.batch_size or profile.batch_size))
 
@@ -190,12 +192,11 @@ def run_experiment(
 
 def run_smoke_pipeline(work_dir: Path, max_examples: int = 6) -> pd.DataFrame:
     """Fast, offline CPU smoke pipeline exercising data -> methods -> eval -> analysis."""
-    from minorsafe.testing import DummyCausalLM, DummyTokenizer
-
     from minorsafe.analysis.aggregate import aggregate_experiment_results
     from minorsafe.analysis.plots import generate_all_figures
     from minorsafe.analysis.report import generate_executive_report
     from minorsafe.analysis.tables import generate_all_tables
+    from minorsafe.testing import DummyCausalLM, DummyTokenizer
 
     work_dir = Path(work_dir)
     data_dir = work_dir / "data"

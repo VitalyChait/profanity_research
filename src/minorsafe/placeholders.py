@@ -32,4 +32,3 @@ def require_real_backend(hardware: Any, component: str, reason: str) -> None:
         f"{component} is a CPU placeholder ({reason}) and is not allowed on hardware profile {name!r}. "
         "Implement the real backend, or set `allow_placeholders: true` in the profile for debugging only."
     )
-

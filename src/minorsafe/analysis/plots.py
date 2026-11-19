@@ -134,4 +134,3 @@ def generate_all_figures(summary_df: pd.DataFrame, fig_dir: Path) -> list[Path]:
     generated.append(_save_fig(fig, fig_dir, "fig8_quantization_scaling"))
 
     return generated
-

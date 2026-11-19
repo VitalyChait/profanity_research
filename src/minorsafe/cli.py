@@ -24,7 +24,9 @@ app = typer.Typer(
     help="Cost-Effective Age-Appropriate LLM Response Generation & Safety Steering for Minors (12-18).",
     no_args_is_help=True,
 )
-judge_app = typer.Typer(help="LLM Judge evaluation and 150-response human annotation tools.", no_args_is_help=True)
+judge_app = typer.Typer(
+    help="LLM Judge evaluation and 150-response human annotation tools.", no_args_is_help=True
+)
 data_app = typer.Typer(help="Dataset construction and data card.", no_args_is_help=True)
 app.add_typer(judge_app, name="judge")
 app.add_typer(data_app, name="data")
@@ -54,11 +56,15 @@ def cmd_info(hardware: str = _hardware_option()) -> None:
 @data_app.command("build")
 def cmd_data_build(
     override: list[str] = typer.Option(None, "--override", "-o"),
-    offline: bool = typer.Option(False, "--offline", help="Use only the built-in seed corpus (no HF downloads)."),
+    offline: bool = typer.Option(
+        False, "--offline", help="Use only the built-in seed corpus (no HF downloads)."
+    ),
 ) -> None:
     """Build evaluation examples, contrastive pairs, obfuscated variants, and results/data_card.md."""
     spec = load_data_spec(overrides=override)
-    examples, pairs, card_path = build_dataset(spec, data_dir=DATA_DIR, results_dir=RESULTS_DIR, offline=offline)
+    examples, pairs, card_path = build_dataset(
+        spec, data_dir=DATA_DIR, results_dir=RESULTS_DIR, offline=offline
+    )
     typer.echo(f"Built {len(examples)} examples and {len(pairs)} pairs. Data card: {card_path}")
 
 
@@ -77,7 +83,9 @@ def cmd_run(
     experiment: str = typer.Option(..., "--experiment", "-e"),
     hardware: str = _hardware_option(),
     override: list[str] = typer.Option(None, "--override", "-o"),
-    final: bool = typer.Option(False, "--final", help="Required guardrail flag when running on 'test' split."),
+    final: bool = typer.Option(
+        False, "--final", help="Required guardrail flag when running on 'test' split."
+    ),
 ) -> None:
     """Execute an experiment grid with atomic Parquet checkpointing."""
     profile = resolve_profile_name(hardware)

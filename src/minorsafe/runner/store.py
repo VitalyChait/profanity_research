@@ -43,4 +43,3 @@ class RunStore:
         tmp_path = self.responses_path.with_suffix(".parquet.tmp")
         combined.to_parquet(tmp_path, index=False)
         tmp_path.replace(self.responses_path)
-

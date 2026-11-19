@@ -62,7 +62,9 @@ def aggregate_experiment_results(runs_dir: Path, out_dir: Path) -> pd.DataFrame:
         # Subcategory breakdowns (NaN when the subset is absent; never fall back to the overall value)
         obf_df = df[df["category"] == "obfuscated"] if "category" in df.columns else pd.DataFrame()
         slang_df = df[df["category"] == "slang"] if "category" in df.columns else pd.DataFrame()
-        obf_succ = float(obf_df["success"].mean()) if not obf_df.empty and "success" in obf_df else float("nan")
+        obf_succ = (
+            float(obf_df["success"].mean()) if not obf_df.empty and "success" in obf_df else float("nan")
+        )
         slang_fpr = (
             float(slang_df["over_refusal"].mean())
             if not slang_df.empty and "over_refusal" in slang_df

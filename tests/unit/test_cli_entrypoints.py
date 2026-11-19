@@ -11,7 +11,6 @@ import re
 import shlex
 import subprocess
 
-import click
 import pytest
 from typer.main import get_command
 
@@ -21,16 +20,28 @@ from minorsafe.utils import REPO_ROOT
 pytestmark = pytest.mark.unit
 
 RUN_PHASE = REPO_ROOT / "scripts" / "run_phase.sh"
-PHASES = ["smoke", "data", "rampup", "guards", "main", "recomposition", "subculture", "quant", "multiturn", "analyze"]
+PHASES = [
+    "smoke",
+    "data",
+    "rampup",
+    "guards",
+    "main",
+    "recomposition",
+    "subculture",
+    "quant",
+    "multiturn",
+    "analyze",
+]
 
 
 def parse_cli(argv: list[str]) -> tuple[str, dict]:
     """Resolve and parse a `minorsafe ...` argv without invoking the command. Returns (path, params)."""
-    cmd: click.Command = get_command(app)
+    cmd = get_command(app)
     name, args, parent, path = "minorsafe", list(argv), None, []
     while True:
-        ctx = cmd.make_context(name, args, parent=parent)
-        if isinstance(cmd, click.Group):
+        ctx = cmd.make_context(name, list(args), parent=parent)
+        # Typer 0.28 vendors Click under typer._click, so check resolve_command instead of click.Group.
+        if hasattr(cmd, "resolve_command"):
             rest = [*getattr(ctx, "_protected_args", []), *ctx.args]
             assert rest, f"missing subcommand in {argv}"
             sub_name, sub_cmd, sub_args = cmd.resolve_command(ctx, rest)
@@ -44,8 +55,10 @@ def parse_cli(argv: list[str]) -> tuple[str, dict]:
 
 def _minorsafe_argv(line: str) -> list[str] | None:
     """Extract argv after `minorsafe` or `-m minorsafe.cli` from a shell line; None if absent."""
-    line = line.split("#", 1)[0].strip()
-    toks = shlex.split(line) if line else []
+    line = line.split("#", 1)[0].strip().rstrip("\\").strip()
+    if "minorsafe" not in line:
+        return None
+    toks = shlex.split(line)
     for i, t in enumerate(toks):
         if t == "minorsafe" or t.endswith("/minorsafe"):
             return toks[i + 1 :]
@@ -93,7 +106,9 @@ def test_run_phase_commands_parse(phase: str):
     if path == "run":
         exp = params["experiment"]
         assert (REPO_ROOT / "configs" / "experiments" / f"{exp}.yaml").exists()
-        split = re.search(r"^split:\s*(\w+)", (REPO_ROOT / "configs" / "experiments" / f"{exp}.yaml").read_text(), re.M)
+        split = re.search(
+            r"^split:\s*(\w+)", (REPO_ROOT / "configs" / "experiments" / f"{exp}.yaml").read_text(), re.M
+        )
         assert params["final"] == (split is not None and split.group(1) == "test")
 
 

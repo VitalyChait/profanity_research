@@ -74,4 +74,3 @@ def calibrate_f1_threshold(y_true: list[int] | np.ndarray, y_score: list[float] 
         if f1 > best_f1:
             best_f1, best_t = f1, float(t)
     return best_t
-

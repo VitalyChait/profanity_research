@@ -52,4 +52,3 @@ Verdicts are computed from the data by the decision rules in `minorsafe/analysis
 """
     report_path.write_text(content, encoding="utf-8")
     return report_path
-

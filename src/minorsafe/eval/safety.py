@@ -69,4 +69,3 @@ def compute_safety_metrics(
         "is_refusal": is_ref,
         "over_refusal": over_ref,
     }
-

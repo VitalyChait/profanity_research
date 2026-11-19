@@ -93,5 +93,7 @@ class ResidualLinearProbe:
     def score_text(self, model, tokenizer, prompt: str, completion: str = "") -> tuple[float, int]:
         """Return (P(unsafe), tokens processed) for a prompt (prompt-level) or prompt+response."""
         comp = "" if self.is_prompt_level else completion
-        acts, n_tok = pooled_activations(model, tokenizer, prompt, comp, [self.layer_idx], pooling=self.pooling)
+        acts, n_tok = pooled_activations(
+            model, tokenizer, prompt, comp, [self.layer_idx], pooling=self.pooling
+        )
         return self.score_activation(acts[self.layer_idx]), n_tok

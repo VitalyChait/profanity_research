@@ -87,4 +87,3 @@ def holm_bonferroni(p_values: Sequence[float]) -> list[float]:
         running_max = max(running_max, adj)
         adjusted[orig_idx] = running_max
     return adjusted
-

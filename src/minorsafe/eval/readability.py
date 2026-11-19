@@ -35,4 +35,3 @@ def compute_readability_metrics(text: str, target_fk_grade: float = 8.0) -> dict
         "rare_word_ratio": float(rare_ratio),
         "fk_compliant": bool(fk <= target_fk_grade),
     }
-

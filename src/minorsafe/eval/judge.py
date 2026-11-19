@@ -99,6 +99,18 @@ def heuristic_judge_score(
     }
 
 
+_BLIND_DROP_COLS = (
+    "run_id",
+    "method",
+    "method_base",
+    "method_params",
+    "method_kind",
+    "action_taken",
+    "blocked",
+    "guard_score",
+)
+
+
 def export_human_annotation_sheet(
     responses_df: pd.DataFrame,
     n: int = 150,
@@ -110,24 +122,55 @@ def export_human_annotation_sheet(
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    df = responses_df.copy()
+    df = responses_df.reset_index(drop=True).copy()
     if len(df) > n:
-        group_col = "method" if "method" in df.columns else None
-        if group_col and df[group_col].nunique() > 1:
-            per_g = max(1, n // df[group_col].nunique())
-            parts = [g.sample(n=min(len(g), per_g), random_state=seed) for _, g in df.groupby(group_col)]
-            sampled = pd.concat(parts, ignore_index=True)
+        group_cols = [c for c in ("method", "category") if c in df.columns]
+        groups = [g for _, g in df.groupby(group_cols, sort=True)] if group_cols else []
+        if len(groups) > 1:
+            per_g = max(1, n // len(groups))
+            parts = [g.sample(n=min(len(g), per_g), random_state=seed) for g in groups]
+            sampled = pd.concat(parts, ignore_index=False)
             if len(sampled) < n:
-                rem = df.drop(sampled.index, errors="ignore")
+                rem = df.loc[df.index.difference(sampled.index)]
                 extra = rem.sample(n=min(len(rem), n - len(sampled)), random_state=seed)
-                sampled = pd.concat([sampled, extra], ignore_index=True)
-            df = sampled.iloc[:n].copy()
+                sampled = pd.concat([sampled, extra], ignore_index=False)
+            elif len(sampled) > n:
+                sampled = sampled.sample(n=n, random_state=seed)
+            df = sampled.copy()
         else:
             df = df.sample(n=n, random_state=seed).copy()
 
     # Shuffle order so human annotator is blind to method grouping
     df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
     df["sample_id"] = [f"H{i + 1:03d}" for i in range(len(df))]
+
+    # Save unblinded companion key before stripping method-identifying columns from the rater sheet
+    key_cols = [
+        c
+        for c in (
+            "sample_id",
+            "run_id",
+            "experiment",
+            "method",
+            "method_base",
+            "method_kind",
+            "model",
+            "quant",
+            "seed",
+            "example_id",
+            "category",
+            "action_taken",
+            "blocked",
+        )
+        if c in df.columns
+    ]
+    key_path = out_path.with_name(f"{out_path.stem}_key.csv")
+    df[key_cols].to_csv(key_path, index=False)
+
+    drop_cols = [c for c in df.columns if c in _BLIND_DROP_COLS or str(c).startswith("x_")]
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+
     df["human_age_appropriate"] = ""
     df["human_meaning_preserved"] = ""
     df["human_helpful"] = ""
@@ -142,18 +185,29 @@ def export_human_annotation_sheet(
 def compute_human_agreement(labeled_csv_path: str | Path) -> dict[str, float]:
     """Compute quadratic-weighted Cohen's kappa and Spearman's rho between human labels and LLM Judge."""
     df = pd.read_csv(labeled_csv_path)
-    df = df.dropna(subset=["human_age_appropriate", "judge_age_appropriate"])
-    if len(df) == 0:
+    if "human_age_appropriate" in df.columns and "judge_age_appropriate" in df.columns:
+        h_age = pd.to_numeric(df["human_age_appropriate"], errors="coerce")
+        j_age = pd.to_numeric(df["judge_age_appropriate"], errors="coerce")
+        n_samples = int((h_age.notna() & j_age.notna()).sum())
+    else:
+        n_samples = 0
+
+    if n_samples == 0:
         return {"n_samples": 0, "cohen_kappa_age_appropriate": 0.0, "spearman_rho_age_appropriate": 0.0}
 
-    out: dict[str, float] = {"n_samples": int(len(df))}
+    out: dict[str, float] = {"n_samples": n_samples}
     for dim in ("age_appropriate", "meaning_preserved", "helpful", "fluent"):
         h_col = f"human_{dim}"
         j_col = f"judge_{dim}"
         if h_col not in df.columns or j_col not in df.columns:
             continue
-        h_vals = pd.to_numeric(df[h_col], errors="coerce").fillna(3).astype(int).to_numpy()
-        j_vals = pd.to_numeric(df[j_col], errors="coerce").fillna(3).astype(int).to_numpy()
+        h_s = pd.to_numeric(df[h_col], errors="coerce")
+        j_s = pd.to_numeric(df[j_col], errors="coerce")
+        valid = h_s.notna() & j_s.notna()
+        if not valid.any():
+            continue
+        h_vals = h_s[valid].round().astype(int).to_numpy()
+        j_vals = j_s[valid].round().astype(int).to_numpy()
         if len(np.unique(h_vals)) <= 1 and len(np.unique(j_vals)) <= 1:
             kappa = 1.0 if np.array_equal(h_vals, j_vals) else 0.0
             rho = 1.0 if np.array_equal(h_vals, j_vals) else 0.0
@@ -165,4 +219,3 @@ def compute_human_agreement(labeled_csv_path: str | Path) -> dict[str, float]:
         out[f"spearman_rho_{dim}"] = rho
 
     return out
-

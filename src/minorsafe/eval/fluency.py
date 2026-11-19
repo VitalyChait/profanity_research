@@ -50,4 +50,3 @@ def compute_fluency_metrics(
         "distinct_2": float(distinct_2),
         "repetition_rate": float(rep_rate),
     }
-
