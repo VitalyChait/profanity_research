@@ -1,4 +1,4 @@
-.PHONY: setup setup-gpu lint format test test-integration smoke data preflight main rampup guards \
+.PHONY: bootstrap setup setup-gpu lint format test test-integration smoke data preflight main rampup guards \
 	main-grid recomposition subculture quant multiturn analyze remote-check remote-setup \
 	remote-sync remote-run remote-status remote-logs remote-pull
 
@@ -6,6 +6,9 @@ UV ?= uv
 # Hardware profile for GPU phases: a name in configs/hardware/ or "auto" (detect via nvidia-smi).
 PROFILE ?= auto
 PHASE ?= smoke
+
+bootstrap:
+	bash setup.sh
 
 setup:
 	$(UV) sync --extra cpu --extra dev

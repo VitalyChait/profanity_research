@@ -16,6 +16,7 @@ pytestmark = pytest.mark.unit
 
 def test_shell_scripts_syntax_valid():
     scripts = [
+        REPO_ROOT / "setup.sh",
         REPO_ROOT / "scripts" / "setup_server.sh",
         REPO_ROOT / "scripts" / "run_phase.sh",
         REPO_ROOT / "scripts" / "activate.sh",
@@ -50,6 +51,7 @@ def test_remote_script_dry_run_subcommands(tmp_path: Path):
                 'REMOTE_HOST="10.0.0.1"',
                 'REMOTE_PORT="22"',
                 'REMOTE_USER="root"',
+                'REMOTE_PASSWORD="test_secret_password"',
                 'REMOTE_DIR="/root/profanity_research"',
                 'REMOTE_PROFILE="gpu_80gb"',
                 'REQUIRE_EXCLUSIVE="1"',
@@ -65,6 +67,7 @@ def test_remote_script_dry_run_subcommands(tmp_path: Path):
 
     cases: list[tuple[list[str], list[str]]] = [
         (["check"], ["ssh", "root@10.0.0.1"]),
+        (["setup-ssh-key"], ["authorized_keys", "root@10.0.0.1"]),
         (
             ["sync"],
             [
@@ -92,6 +95,65 @@ def test_remote_script_dry_run_subcommands(tmp_path: Path):
             check=False,
         )
         assert res.returncode == 0, f"remote.sh {argv} failed: {res.stderr}\n{res.stdout}"
+        assert "test_secret_password" not in res.stdout
+        assert "test_secret_password" not in res.stderr
         unescaped = res.stdout.replace("\\", "")
         for sub in expected_substrings:
             assert sub in unescaped, f"Expected {sub!r} in output for {argv}: {unescaped}"
+
+    # Non-root REMOTE_USER derives /home/<user>/profanity_research when REMOTE_DIR is omitted.
+    std_env = tmp_path / ".remote_std.env"
+    std_env.write_text('REMOTE_HOST="10.0.0.1"\nREMOTE_USER="std-ai"\n', encoding="utf-8")
+    std_env.chmod(0o600)
+    res_std = subprocess.run(
+        ["bash", str(script), "sync"],
+        env={**os.environ, "DRY_RUN": "1", "REMOTE_ENV_FILE": str(std_env)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_std.returncode == 0, res_std.stderr
+    assert "std-ai@10.0.0.1:/home/std-ai/profanity_research/" in res_std.stdout
+
+
+def test_root_setup_script_dry_run(tmp_path: Path):
+    env_file = tmp_path / ".remote.env"
+    pw = "test_root_pw_value"
+    env_file.write_text(
+        "\n".join(
+            [
+                'REMOTE_HOST="10.0.0.1"',
+                'REMOTE_USER="root"',
+                f'REMOTE_PASSWORD="{pw}"',
+                'REMOTE_DIR="/root/profanity_research"',
+                'REMOTE_PROFILE="gpu_80gb"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+
+    script = REPO_ROOT / "setup.sh"
+    base_env = {**os.environ, "DRY_RUN": "1", "REMOTE_ENV_FILE": str(env_file)}
+
+    res_local = subprocess.run(
+        ["bash", str(script), "--local"], env=base_env, capture_output=True, text=True, check=False
+    )
+    assert res_local.returncode == 0, res_local.stderr + res_local.stdout
+    assert pw not in res_local.stdout and pw not in res_local.stderr
+
+    res_remote = subprocess.run(
+        ["bash", str(script), "--remote"], env=base_env, capture_output=True, text=True, check=False
+    )
+    assert res_remote.returncode == 0, res_remote.stderr + res_remote.stdout
+    for expected in ("authorized_keys", "root@10.0.0.1", "setup_server.sh"):
+        assert expected in res_remote.stdout
+    assert pw not in res_remote.stdout and pw not in res_remote.stderr
+
+    res_check = subprocess.run(
+        ["bash", str(script), "--check"], env=base_env, capture_output=True, text=True, check=False
+    )
+    assert res_check.returncode == 0, res_check.stderr + res_check.stdout
+    assert "preflight" in res_check.stdout
+    assert pw not in res_check.stdout and pw not in res_check.stderr

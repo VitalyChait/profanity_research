@@ -15,19 +15,17 @@ Connect to your University VPN first, then configure local gitignored credential
 # 1. Create gitignored credentials file (never committed to this public repo)
 cp .remote.env.example .remote.env
 chmod 600 .remote.env
-# Edit .remote.env: set REMOTE_HOST, REMOTE_USER="root", REMOTE_DIR, HF_TOKEN, etc.
+# Edit .remote.env: set REMOTE_HOST, REMOTE_USER="root", REMOTE_SSH_KEY / REMOTE_PASSWORD, REMOTE_DIR, HF_TOKEN, etc.
 
-# 2. Install local pre-commit hook that blocks accidental credential commits
-bash scripts/install_git_hooks.sh
+# 2. One-command entry point: installs git secret hook, sets up local .venv, installs SSH key on server
+#    (uses OpenSSH SSH_ASKPASS_REQUIRE=force when REMOTE_PASSWORD is set—no sshpass package needed),
+#    validates VPN + server exclusivity, syncs code, and bootstraps remote GPU env + preflight:
+./setup.sh            # (equivalent: `make bootstrap` or `./setup.sh --remote`)
 
-# 3. Verify VPN reachability, GPU idle status, and that no other user is logged in (`who`)
+# 3. Verify VPN reachability, GPU idle status, and that no other user is logged in (`who`) anytime:
 make remote-check
 
-# 4. Install SSH key (so root password/sshpass isn't needed afterwards), sync repo, and bootstrap GPU env
-bash scripts/remote.sh setup-ssh-key
-make remote-setup
-
-# 5. Run a phase remotely (or --detach inside tmux on the server) and monitor smart logs
+# 4. Run phases remotely (or --detach inside tmux on the server) and monitor smart logs:
 bash scripts/remote.sh run data auto
 bash scripts/remote.sh run main gpu_80gb --detach
 make remote-status
@@ -35,7 +33,7 @@ make remote-logs
 make remote-pull
 ```
 
-`scripts/remote.sh` enforces `.remote.env` gitignore/untracked status and `chmod 600`, checks TCP reachability within `VPN_CHECK_TIMEOUT`, validates server exclusivity (`REQUIRE_EXCLUSIVE=1` aborts if other users or GPU compute apps are active), excludes `.remote.env*`/`.secrets/`/`*.pem`/`*.key` from `rsync`, and writes smart JSONL + ETA logs remotely under `results/logs/`.
+`scripts/remote.sh` enforces `.remote.env` gitignore/untracked status and `chmod 600`, checks TCP reachability within `VPN_CHECK_TIMEOUT`, validates server exclusivity (`REQUIRE_EXCLUSIVE=1` aborts if other users or GPU compute apps are active), supports password auth without requiring `sshpass` (via OpenSSH `SSH_ASKPASS_REQUIRE=force`), excludes `.remote.env*`/`.secrets/`/`*.pem`/`*.key` from `rsync`, and writes smart JSONL + ETA logs remotely under `results/logs/`.
 
 ---
 

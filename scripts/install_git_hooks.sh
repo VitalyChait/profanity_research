@@ -34,7 +34,8 @@ if [ -n "${staged_files}" ]; then
 fi
 
 # Scan added lines in staged diff for non-empty REMOTE_PASSWORD or HF_TOKEN values
-added_lines="$(git diff --cached -U0 -- . ':(exclude).remote.env.example' | grep -E '^\+[^+]' || true)"
+# (skip example templates, this hook generator, and unit test fixtures).
+added_lines="$(git diff --cached -U0 -- . ':(exclude).remote.env.example' ':(exclude)scripts/install_git_hooks.sh' ':(exclude)tests/' | grep -E '^\+[^+]' || true)"
 if [ -n "${added_lines}" ]; then
     if echo "${added_lines}" | grep -Eq 'REMOTE_PASSWORD[[:space:]]*=[[:space:]]*["'\'']?[^"'\''[:space:]#]+' ; then
         echo "[pre-commit] ERROR: Detected hardcoded REMOTE_PASSWORD in staged diff." >&2

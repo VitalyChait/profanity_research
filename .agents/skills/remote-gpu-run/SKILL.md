@@ -17,10 +17,11 @@ Connect to the University VPN, then create your gitignored `.remote.env` (never 
 ```bash
 cp .remote.env.example .remote.env
 chmod 600 .remote.env
-bash scripts/install_git_hooks.sh
+# Edit .remote.env, connect to University VPN, then run the repo entry point:
+./setup.sh                                    # (or `make bootstrap`) hooks + local .venv + SSH key + check + remote setup
 
 make remote-check                             # VPN TCP check + exclusivity (`who` + GPU idle)
-bash scripts/remote.sh setup-ssh-key          # optional: install SSH key for root
+bash scripts/remote.sh setup-ssh-key          # installs SSH key (uses OpenSSH askpass if REMOTE_PASSWORD set; no sshpass needed)
 make remote-setup                             # rsync + setup_server.sh + remote preflight
 bash scripts/remote.sh run main gpu_80gb --detach
 make remote-status                            # live ETA status, tmux, GPUs, latest log tail

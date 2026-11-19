@@ -62,8 +62,16 @@ fi
 
 REMOTE_HOST="${REMOTE_HOST:-gpu-server.university.edu}"
 REMOTE_PORT="${REMOTE_PORT:-22}"
-REMOTE_USER="${REMOTE_USER:-root}"
-REMOTE_DIR="${REMOTE_DIR:-/root/profanity_research}"
+REMOTE_USER="${REMOTE_USER:-std-ai}"
+if [[ -z "${REMOTE_HOME:-}" ]]; then
+    if [[ "${REMOTE_USER}" == "root" ]]; then
+        REMOTE_HOME="/root"
+    else
+        REMOTE_HOME="/home/${REMOTE_USER}"
+    fi
+fi
+REMOTE_DIR="${REMOTE_DIR:-${REMOTE_HOME}/profanity_research}"
+HF_HOME="${HF_HOME:-${REMOTE_HOME}/.cache/huggingface}"
 REMOTE_PROFILE="${REMOTE_PROFILE:-auto}"
 VPN_CHECK_TIMEOUT="${VPN_CHECK_TIMEOUT:-5}"
 REQUIRE_EXCLUSIVE="${REQUIRE_EXCLUSIVE:-1}"
@@ -75,6 +83,7 @@ REMOTE_TARGET="${REMOTE_USER}@${REMOTE_HOST}"
 SSH_OPTS=(
     -p "${REMOTE_PORT}"
     -o "ConnectTimeout=${VPN_CHECK_TIMEOUT}"
+    -o StrictHostKeyChecking=accept-new
     -o ServerAliveInterval=30
     -o ServerAliveCountMax=4
 )
@@ -82,25 +91,55 @@ if [[ -n "${REMOTE_SSH_KEY:-}" ]] && [[ -f "${REMOTE_SSH_KEY}" ]]; then
     SSH_OPTS+=(-i "${REMOTE_SSH_KEY}")
 fi
 
-RSYNC_SSH="ssh -p ${REMOTE_PORT} -o ConnectTimeout=${VPN_CHECK_TIMEOUT} -o ServerAliveInterval=30 -o ServerAliveCountMax=4"
+RSYNC_SSH="ssh -p ${REMOTE_PORT} -o ConnectTimeout=${VPN_CHECK_TIMEOUT} -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=4"
 if [[ -n "${REMOTE_SSH_KEY:-}" ]] && [[ -f "${REMOTE_SSH_KEY}" ]]; then
     RSYNC_SSH+=" -i ${REMOTE_SSH_KEY}"
 fi
 
+_REMOTE_CLEANUP_FILES=()
+cleanup_remote() {
+    local f
+    for f in "${_REMOTE_CLEANUP_FILES[@]:-}"; do
+        [[ -n "${f}" && -f "${f}" ]] && rm -f "${f}" || true
+    done
+}
+trap cleanup_remote EXIT INT TERM
+
 AUTH_PREFIX=()
+_HAS_PASSWORD=0
 if [[ -n "${REMOTE_PASSWORD:-}" ]]; then
-    if [[ "${DRY_RUN:-0}" != "1" ]] && ! command -v sshpass >/dev/null 2>&1; then
-        echo "[remote] ERROR: REMOTE_PASSWORD is set but 'sshpass' is not installed (or switch to SSH keys via setup-ssh-key)." >&2
-        exit 1
-    fi
     export SSHPASS="${REMOTE_PASSWORD}"
-    AUTH_PREFIX=(sshpass -e)
+    _HAS_PASSWORD=1
 elif [[ -n "${REMOTE_PASSWORD_FILE:-}" ]]; then
-    if [[ "${DRY_RUN:-0}" != "1" ]] && ! command -v sshpass >/dev/null 2>&1; then
-        echo "[remote] ERROR: REMOTE_PASSWORD_FILE is set but 'sshpass' is not installed." >&2
+    if [[ -f "${REMOTE_PASSWORD_FILE}" ]]; then
+        export SSHPASS
+        SSHPASS="$(cat "${REMOTE_PASSWORD_FILE}")"
+        _HAS_PASSWORD=1
+    elif [[ "${DRY_RUN:-0}" != "1" ]]; then
+        echo "[remote] ERROR: REMOTE_PASSWORD_FILE does not exist: ${REMOTE_PASSWORD_FILE}" >&2
         exit 1
     fi
-    AUTH_PREFIX=(sshpass -f "${REMOTE_PASSWORD_FILE}")
+fi
+
+if [[ "${_HAS_PASSWORD}" == "1" ]]; then
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        AUTH_PREFIX=()
+    elif command -v sshpass >/dev/null 2>&1; then
+        AUTH_PREFIX=(sshpass -e)
+    else
+        # OpenSSH >= 8.4 built-in non-interactive password prompt (no external sshpass required)
+        _ASKPASS_SCRIPT="$(mktemp)"
+        _REMOTE_CLEANUP_FILES+=("${_ASKPASS_SCRIPT}")
+        cat > "${_ASKPASS_SCRIPT}" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${SSHPASS:-}"
+EOF
+        chmod 700 "${_ASKPASS_SCRIPT}"
+        export SSH_ASKPASS="${_ASKPASS_SCRIPT}"
+        export SSH_ASKPASS_REQUIRE="force"
+        export DISPLAY="${DISPLAY:-minorsafe:0}"
+        AUTH_PREFIX=()
+    fi
 fi
 
 check_vpn_reachable() {
@@ -235,10 +274,13 @@ EOF
             chmod 700 "$(dirname "${KEY_PATH}")"
             ssh-keygen -t ed25519 -f "${KEY_PATH}" -N "" -C "minorsafe@$(hostname)"
         fi
-        PUB_KEY="$(cat "${KEY_PATH}.pub")"
-        "${AUTH_PREFIX[@]}" ssh "${SSH_OPTS[@]}" "${REMOTE_TARGET}" \
-            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && grep -qxF $(printf '%q' "${PUB_KEY}") ~/.ssh/authorized_keys || printf '%s\n' $(printf '%q' "${PUB_KEY}") >> ~/.ssh/authorized_keys"
+        PUB_KEY="$(cat "${KEY_PATH}.pub" 2>/dev/null || ssh-keygen -y -f "${KEY_PATH}")"
+        KEY_SSH_OPTS=("${SSH_OPTS[@]}" -i "${KEY_PATH}")
+        "${AUTH_PREFIX[@]}" ssh "${KEY_SSH_OPTS[@]}" "${REMOTE_TARGET}" \
+            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qxF $(printf '%q' "${PUB_KEY}") ~/.ssh/authorized_keys || printf '%s\n' $(printf '%q' "${PUB_KEY}") >> ~/.ssh/authorized_keys)"
         echo "[remote] Installed SSH public key ${KEY_PATH}.pub on ${REMOTE_TARGET}"
+        env -u SSH_ASKPASS -u SSH_ASKPASS_REQUIRE -u SSHPASS ssh -o BatchMode=yes "${KEY_SSH_OPTS[@]}" "${REMOTE_TARGET}" \
+            "echo '[remote] Passwordless SSH key auth verified on '\$(hostname)"
         ;;
 
     sync)
