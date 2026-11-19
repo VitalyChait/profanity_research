@@ -12,7 +12,7 @@ import copy
 import torch
 
 from minorsafe.data.schema import Example
-from minorsafe.generation import ChatGenerator, format_chat
+from minorsafe.generation import format_chat
 from minorsafe.methods.base import MethodOutput, ResponseMethod, RunContext
 from minorsafe.placeholders import require_real_backend
 from minorsafe.telemetry.cost import SetupReport
@@ -29,12 +29,7 @@ class LoRAResponseMethod(ResponseMethod):
         if not self._owns_model:
             # Never mutate a shared preloaded model in place: later runs would inherit the trained weights.
             self.model = copy.deepcopy(self.model)
-            self.generator = ChatGenerator(
-                self.model,
-                self.tokenizer,
-                spec=ctx.generator_spec,
-                max_new_tokens=ctx.hardware.max_new_tokens,
-            )
+            self.generator = self._make_generator(ctx)
         n_calib = int(self.spec.params.get("n_calib", 50))
         epochs = int(self.spec.params.get("epochs", 1))
         lr = float(self.spec.params.get("lr", 2.0e-4))

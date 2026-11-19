@@ -28,6 +28,9 @@ class RunContext:
     quant: str = "bf16"
     artifact_dir: Path = Path("results/artifacts")
     preloaded_generator: tuple[Any, Any] | None = None
+    # Decoding settings from the ExperimentSpec (None -> hardware profile default).
+    temperature: float = 0.0
+    max_new_tokens: int | None = None
 
 
 @dataclass
@@ -82,11 +85,15 @@ class ResponseMethod(ABC):
                 ctx.generator_spec, quant=ctx.quant, device=ctx.hardware.device
             )
             self._owns_model = True
-        self.generator = ChatGenerator(
+        self.generator = self._make_generator(ctx)
+
+    def _make_generator(self, ctx: RunContext) -> ChatGenerator:
+        return ChatGenerator(
             self.model,
             self.tokenizer,
             spec=ctx.generator_spec,
-            max_new_tokens=ctx.hardware.max_new_tokens,
+            max_new_tokens=ctx.max_new_tokens or ctx.hardware.max_new_tokens,
+            temperature=ctx.temperature,
         )
 
     @abstractmethod

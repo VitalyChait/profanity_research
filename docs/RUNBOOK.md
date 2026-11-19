@@ -1,95 +1,128 @@
 # MinorSafe Remote Server Runbook (`teen_12_18`)
 
-Step-by-step operator guide for running the MinorSafe benchmark on a high-compute remote Linux server (single GPU or multi-GPU node, or SLURM cluster).
+Step-by-step operator guide for running the MinorSafe benchmark on a remote Linux GPU server (single GPU, multi-GPU node, or SLURM cluster). Every command below is exercised by `tests/unit/test_cli_entrypoints.py`.
+
+> [!WARNING]
+> **Placeholder components fail closed.** GPU profiles set `allow_placeholders: false`, so any phase that still depends on a CPU placeholder raises `PlaceholderBackendError` instead of producing numbers. Currently gated: M1 guards (`m1_encoder_guard`, `m1_decoder_guard`), M2 LoRA (`m2_lora`), the `mlm_substitute` action, `capability_eval`, the LLM judge (`judge_backend: vllm|hf`), and reference-LM perplexity (`ppl_model`). M0a/M0b and M3 steering (SwFC/StTP/StMP/Ortho, and the probe guard with a non-MLM action) are real. See `src/minorsafe/placeholders.py`.
 
 ---
 
 ## 1. Environment Bootstrap & Pre-Flight Verification
 
 ```bash
-# 1. Bootstrap Python 3.11 + uv virtual environment
+export HF_TOKEN="hf_your_token_here"          # gated models: Llama-3.x, Gemma
+export HF_HOME="/scratch/$USER/hf_cache"      # fast, persistent storage for checkpoints
+
+# Installs uv if needed, runs `uv sync --extra gpu --extra vllm --extra dev`, creates results/ dirs,
+# warns if HF_TOKEN is missing, and prints `minorsafe info --hardware auto`.
 bash scripts/setup_server.sh
 source .venv/bin/activate
 
-# 2. Authenticate with HuggingFace for gated models (Llama-3.1/3.2, Gemma-2, ShieldGemma)
-export HF_TOKEN="hf_your_token_here"
-export HF_HOME="/scratch/$USER/hf_cache"
+# Inspect hardware ("auto" picks a profile from nvidia-smi) and pre-download checkpoints.
+minorsafe info --hardware auto
+python scripts/download_models.py --profile auto --dry-run
+python scripts/download_models.py --profile auto --verify
 
-# 3. Inspect hardware and dry-run model downloads
-minorsafe info --profile gpu_80gb
-python scripts/download_models.py --profile gpu_80gb --dry-run
-
-# 4. Pre-download and verify all checkpoints before launching GPU jobs
-python scripts/download_models.py --profile gpu_80gb --verify
-
-# 5. Run the CPU smoke test and full test suite
+# CPU test suite + CPU smoke pipeline (dummy models; validates plumbing only).
 make test
 make smoke
 ```
+
+Available profiles in `configs/hardware/`: `cpu_debug`, `gpu_24gb`, `gpu_48gb`, `gpu_80gb`, `multi_gpu_80gb`. Every command that takes a profile accepts `--hardware <name|auto>` (alias `--profile`).
 
 ---
 
 ## 2. Building the Dataset & Contrastive Corpus
 
 ```bash
-# Builds data/processed/examples.parquet, data/processed/pairs.parquet, and results/data_card.md
-make data PROFILE=gpu_80gb
+make data                  # == minorsafe data build  (add --offline to use only the seed corpus)
+minorsafe data report      # prints results/data_card.md
 ```
 
-- **Locked Age Group**: `12–18` (`teen_12_18`, target Flesch-Kincaid grade $\le 8.0$).
-- **Unicode & Emoji Policy**: `NFC` normalization only; all emojis (`💀`, `😭`, `🔥`, `🖕`), symbols, and special characters are preserved end-to-end.
+- Writes `data/processed/examples.parquet`, `data/processed/pairs.parquet`, and `results/data_card.md`.
+- **Locked Age Group**: `12–18` (`teen_12_18`, target Flesch-Kincaid grade ≤ 8.0).
+- **Unicode & Emoji Policy**: `NFC` normalization only; all emojis, symbols, and special characters are preserved end to end.
 
 ---
 
-## 3. Running the Core Benchmark Suite
+## 3. Running the Benchmark
 
-All core experiments exclude multi-turn flow detection by default (`make main`):
+Each phase is run by `scripts/run_phase.sh <phase> [profile]`, which logs to `results/logs/<phase>_<timestamp>.log` and adds `--final` automatically only for experiments whose config targets the `test` split. Use `DRY_RUN=1` to print the command without running it.
+
+| Phase | Experiment config | Split | In `make main` |
+| :--- | :--- | :--- | :--- |
+| `smoke` | CPU smoke pipeline (dummy models) | – | – |
+| `data` | `configs/data.yaml` | – | ✅ |
+| `rampup` | `ramp_up.yaml` | dev | ✅ |
+| `guards` | `guards.yaml` | test | ✅ |
+| `main` | `main_grid.yaml` | test | ✅ |
+| `recomposition` | `recomposition.yaml` | test | ✅ |
+| `subculture` | `subculture_audit.yaml` | test | ✅ |
+| `quant` | `quant_grid.yaml` | dev | – (secondary) |
+| `multiturn` | `multiturn.yaml` | dev | – (optional, Decision 5) |
+| `analyze` | aggregates `results/runs/` | – | ✅ |
 
 ```bash
-# Run core experiments (main_grid, recomposition, subculture_audit, ramp_up, quant_grid)
+# Full core pipeline (data -> rampup -> guards -> main -> recomposition -> subculture -> analyze)
 make main PROFILE=gpu_80gb
 
-# Or run individual phases inside tmux / screen:
-bash scripts/run_phase.sh main_grid gpu_80gb
-bash scripts/run_phase.sh recomposition gpu_80gb
-bash scripts/run_phase.sh subculture_audit gpu_80gb
-bash scripts/run_phase.sh ramp_up gpu_80gb
-bash scripts/run_phase.sh quant_grid gpu_80gb
-```
+# Or single phases (inside tmux/screen):
+make guards PROFILE=gpu_80gb                  # == bash scripts/run_phase.sh guards gpu_80gb
+bash scripts/run_phase.sh main gpu_80gb
+DRY_RUN=1 bash scripts/run_phase.sh main gpu_80gb   # show the command only
 
-### Optional Multi-Turn Extension (Non-Core)
-```bash
+# Secondary / optional studies
+make quant PROFILE=gpu_80gb
 make multiturn PROFILE=gpu_80gb
+
+# Progress
+minorsafe status
 ```
 
-### SLURM Job Array Submission
+### SLURM Job Array
+
 ```bash
+mkdir -p results/logs   # SLURM does not create the --output directory
 sbatch --export=ALL,PROFILE=gpu_80gb scripts/slurm/run_grid.sbatch
 ```
+
+Array tasks `0-5` map to phases `main guards recomposition subculture rampup quant`. Run `make data` before submitting, and `make analyze` after all tasks finish.
 
 ---
 
 ## 4. Human Annotation Calibration (150 Samples)
 
 ```bash
-# Export 150 stratified, method-blinded responses to results/human_eval_150.csv
+# Export 150 stratified, method-blinded responses
 minorsafe judge export-human --n 150 --out results/human_eval_150.csv
 
-# After labeling human_* columns in results/human_eval_150_labeled.csv:
-minorsafe judge agreement --csv results/human_eval_150_labeled.csv --out results/human_judge_agreement.json
+# After filling the human_* columns and saving as results/human_eval_150_labeled.csv:
+minorsafe judge agreement --human-csv results/human_eval_150_labeled.csv --out results/human_judge_agreement.json
 ```
 
 ---
 
-## 5. Aggregation, Raw Token/Time Cost Table, Figures & Executive Report
+## 5. Aggregation, Raw Token/Time Cost Table, Figures & Report
 
 ```bash
-make analyze
+make analyze      # == minorsafe analyze [--runs results/runs] [--out results]
 ```
 
 Outputs in `results/`:
-- `results/cost_table.csv` — Raw token counts (`tok_total_mean`, `setup_tokens`) and wall-clock/GPU execution times (`e2e_ms_p50`, `decode_tok_per_s_mean`, `setup_wall_s`, `setup_gpu_s`) with **no hardcoded dollar prices**.
-- `results/figures/fig1_*.pdf` .. `fig8_*.pdf` — All 8 publication figures.
-- `results/tables/main_benchmark.{md,tex}` & `results/tables/hypothesis_verdicts.{md,tex}`.
-- `results/REPORT.md` — Executive report with hypothesis verdicts `H1`–`H10`.
+- `cost_table.csv`: raw token counts (`tok_total_mean`, `setup_tokens`) and wall-clock/GPU times (`e2e_ms_p50`, `decode_tok_per_s_mean`, `setup_wall_s`, `setup_gpu_s`), with **no hardcoded dollar prices**. `energy_j_mean` / `peak_vram_mb` are `NaN` until GPU sampling is wired.
+- `figures/fig1_*.pdf` .. `fig8_*.pdf`
+- `tables/main_benchmark.{md,tex}` and `tables/hypothesis_verdicts.{md,tex}`: H1–H10 verdicts computed by explicit decision rules (`src/minorsafe/analysis/hypotheses.py`); `NOT_EVALUATED` entries state the missing data.
+- `REPORT.md`
 
+---
+
+## 6. Troubleshooting
+
+| Symptom | Cause / Fix |
+| :--- | :--- |
+| `PlaceholderBackendError: ... is a CPU placeholder` | Expected on GPU profiles until the component is implemented. Remove that method/flag from the experiment, or implement the real backend. Never set `allow_placeholders: true` on a profile used for reported results. |
+| `PermissionError: ... targets the 'test' split` | Run via `run_phase.sh` (adds `--final` for test-split configs) or pass `--final` explicitly. |
+| `ValueError: No calibration pairs for steering concept ...` | The data build produced no pairs for a configured concept; check `results/data_card.md` and the method's `concepts`. |
+| Gated repo / 401 errors | `export HF_TOKEN=...` and accept the model licence on huggingface.co. |
+| CUDA OOM | Use a smaller profile (`gpu_24gb` uses QLoRA for L models) or lower `batch_size` via `-o batch_size=1`. OOM batch-halving retry is not implemented yet. |
+| Pull results locally | `rsync -avz --exclude '*.safetensors' server:~/profanity_research/results/ ./results/` |

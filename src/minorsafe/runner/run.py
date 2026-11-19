@@ -122,6 +122,8 @@ def run_experiment(
         # config flag silently do nothing on profiles used for reported results.
         require_real_backend(profile, "capability_eval", "tinyMMLU/tinyGSM8K retention is not wired into the runner")
 
+    batch_size = max(1, int(exp.batch_size or profile.batch_size))
+
     for rspec in specs:
         run_dir = exp_runs_dir / rspec.run_id
         store = RunStore(run_dir)
@@ -129,43 +131,57 @@ def run_experiment(
 
         age_band = age_bands[rspec.age_band]
         gen_spec = models[rspec.generator_alias]
-        ctx = RunContext(
-            hardware=profile,
-            generator_spec=gen_spec,
-            models=models,
-            age_bands=age_bands,
-            prompts=prompts,
-            calib_pairs=calib_pairs,
-            calib_examples=calib_ex,
-            dev_examples=dev_ex,
-            quant=rspec.quant,
-            artifact_dir=exp_runs_dir / "_artifacts",
-            preloaded_generator=preloaded_generator,
-        )
-        method = create_method(rspec.method_spec)
-        setup_rec = method.setup(ctx)
-        write_json(run_dir / "setup.json", setup_rec.to_dict())
+        todo_by_seed = {s: [ex for ex in split_examples if (ex.id, s) not in done] for s in exp.seeds}
+        pending = any(todo_by_seed.values())
 
-        for seed in exp.seeds:
-            todo = [ex for ex in split_examples if (ex.id, seed) not in done]
-            if not todo:
-                continue
-            outputs = method.respond(todo, age_band=rspec.age_band, seed=seed)
-            rows = [
-                _output_to_row(out, rspec, gen_spec, seed, ex) for ex, out in zip(todo, outputs, strict=True)
-            ]
-            store.append_responses(rows)
+        if pending:
+            ctx = RunContext(
+                hardware=profile,
+                generator_spec=gen_spec,
+                models=models,
+                age_bands=age_bands,
+                prompts=prompts,
+                calib_pairs=calib_pairs,
+                calib_examples=calib_ex,
+                dev_examples=dev_ex,
+                quant=rspec.quant,
+                artifact_dir=exp_runs_dir / "_artifacts",
+                preloaded_generator=preloaded_generator,
+                temperature=exp.temperature,
+                max_new_tokens=exp.max_new_tokens,
+            )
+            method = create_method(rspec.method_spec)
+            setup_rec = method.setup(ctx)
+            write_json(run_dir / "setup.json", setup_rec.to_dict())
 
-        method.teardown()
+            try:
+                # Discarded warmup queries (plan §2.2) so CUDA/kernel initialisation is not timed.
+                warm = split_examples[: max(0, exp.warmup_queries)]
+                if warm:
+                    method.respond(warm, age_band=rspec.age_band, seed=exp.seeds[0] if exp.seeds else 0)
+
+                for seed, todo in todo_by_seed.items():
+                    # Generate and checkpoint batch by batch, so a crash loses at most one batch.
+                    for i in range(0, len(todo), batch_size):
+                        chunk = todo[i : i + batch_size]
+                        outputs = method.respond(chunk, age_band=rspec.age_band, seed=seed)
+                        rows = [
+                            _output_to_row(out, rspec, gen_spec, seed, ex)
+                            for ex, out in zip(chunk, outputs, strict=True)
+                        ]
+                        store.append_responses(rows)
+            finally:
+                method.teardown()
 
         if exp.evaluate:
             df = store.load_responses()
-            eval_df = evaluate_responses_df(
-                df,
-                eval_settings=profile.eval,
-                target_fk_grade=age_band.target_fk_grade,
-            )
-            eval_df.to_parquet(store.responses_path, index=False)
+            if not df.empty and (pending or "success" not in df.columns):
+                eval_df = evaluate_responses_df(
+                    df,
+                    eval_settings=profile.eval,
+                    target_fk_grade=age_band.target_fk_grade,
+                )
+                eval_df.to_parquet(store.responses_path, index=False)
 
         completed_dirs.append(run_dir)
 

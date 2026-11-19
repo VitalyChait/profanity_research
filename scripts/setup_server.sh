@@ -13,15 +13,18 @@ if ! command -v uv >/dev/null 2>&1; then
     export PATH="${HOME}/.local/bin:${PATH}"
 fi
 
-if [ ! -d ".venv" ]; then
-    uv venv --python 3.11 .venv
-fi
-
-uv pip install --python .venv/bin/python -e ".[dev]"
+# Install the locked environment with CUDA torch, bitsandbytes, and vLLM (plan §0.1 / Phase 10).
+uv sync --python 3.11 --extra gpu --extra vllm --extra dev
 
 export HF_HOME="${HF_HOME:-${REPO_ROOT}/.cache/huggingface}"
 export TOKENIZERS_PARALLELISM="false"
-mkdir -p "${HF_HOME}" data/raw data/processed results/runs results/figures results/tables
+mkdir -p "${HF_HOME}" data/raw data/processed results/runs results/figures results/tables results/logs
+
+if [ -z "${HF_TOKEN:-}" ]; then
+    echo "[setup_server] WARNING: HF_TOKEN is not set; gated models (Llama, Gemma) will fail to download." >&2
+fi
+
+.venv/bin/python -m minorsafe.cli info --hardware auto || true
 
 echo "[setup_server] Environment ready. Activate with: source .venv/bin/activate"
 

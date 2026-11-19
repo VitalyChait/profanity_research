@@ -8,6 +8,7 @@ import os
 import sys
 
 from minorsafe.config import load_hardware, load_models
+from minorsafe.hardware import resolve_profile_name
 
 
 def collect_profile_models(profile_name: str) -> list[tuple[str, str, bool]]:
@@ -34,14 +35,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Download or verify HuggingFace models for a hardware profile."
     )
-    parser.add_argument("--profile", default="cpu_debug", help="Hardware profile name in configs/hardware/")
+    parser.add_argument(
+        "--profile", default="cpu_debug", help="Hardware profile name in configs/hardware/, or 'auto'"
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print required models without downloading")
     parser.add_argument("--verify", action="store_true", help="Verify tokenizer/config load for each model")
     parser.add_argument("--cache-dir", default=os.environ.get("HF_HOME"), help="Optional HF cache dir")
     args = parser.parse_args()
 
-    entries = collect_profile_models(args.profile)
-    print(f"Profile '{args.profile}' requires {len(entries)} model(s):")
+    profile = resolve_profile_name(args.profile)
+    entries = collect_profile_models(profile)
+    print(f"Profile '{profile}' requires {len(entries)} model(s):")
     for alias, hf_id, gated in entries:
         gate_tag = " [GATED]" if gated else ""
         print(f"  - {alias}: {hf_id}{gate_tag}")
