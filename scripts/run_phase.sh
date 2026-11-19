@@ -55,5 +55,46 @@ fi
 LOG_DIR="${REPO_ROOT}/results/logs"
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/${PHASE}_$(date +%Y%m%d_%H%M%S).log"
-echo "[run_phase] phase=${PHASE} profile=${PROFILE} log=${LOG_FILE}"
-"${CMD[@]}" 2>&1 | tee "${LOG_FILE}"
+ln -sfn "${LOG_FILE}" "${LOG_DIR}/latest.log"
+
+echo "[run_phase] START phase=${PHASE} profile=${PROFILE} host=$(hostname) user=${USER:-unknown} log=${LOG_FILE}" | tee -a "${LOG_FILE}"
+
+# Run initial hardware, exclusivity, credential, and environment checks before GPU experiment phases.
+if [[ "${SKIP_PREFLIGHT:-0}" != "1" ]] && [[ "${PHASE}" != "smoke" ]] && [[ "${PHASE}" != "data" ]] && [[ "${PHASE}" != "analyze" ]]; then
+    PREFLIGHT_ARGS=(preflight --hardware "${PROFILE}")
+    if [[ "${MINORSAFE_ALLOW_BUSY:-0}" == "1" ]]; then
+        PREFLIGHT_ARGS+=(--allow-busy)
+    fi
+    "${CLI[@]}" "${PREFLIGHT_ARGS[@]}" 2>&1 | tee -a "${LOG_FILE}"
+fi
+
+GPU_MON_PID=""
+cleanup_gpu_mon() {
+    if [[ -n "${GPU_MON_PID}" ]]; then
+        kill "${GPU_MON_PID}" 2>/dev/null || true
+    fi
+}
+trap cleanup_gpu_mon EXIT INT TERM
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    GPU_CSV="${LOG_FILE%.log}.gpu.csv"
+    echo "timestamp,index,utilization.gpu,memory.used,temperature.gpu" > "${GPU_CSV}"
+    (
+        while true; do
+            nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used,temperature.gpu --format=csv,noheader >> "${GPU_CSV}" 2>/dev/null || true
+            sleep 15
+        done
+    ) &
+    GPU_MON_PID=$!
+fi
+
+T_START="$(date +%s)"
+set +e
+"${CMD[@]}" 2>&1 | tee -a "${LOG_FILE}"
+STATUS="${PIPESTATUS[0]}"
+set -e
+T_END="$(date +%s)"
+ELAPSED="$((T_END - T_START))"
+
+echo "[run_phase] DONE phase=${PHASE} profile=${PROFILE} elapsed=${ELAPSED}s status=${STATUS} log=${LOG_FILE}" | tee -a "${LOG_FILE}"
+exit "${STATUS}"

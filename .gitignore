@@ -225,3 +225,14 @@ results/
 models_cache/
 *.safetensors
 *.pt
+
+# Remote server credentials, SSH keys, and runtime lockfiles (NEVER commit to public repo)
+.remote.env
+.remote.env.*
+!.remote.env.example
+.secrets/
+*.pem
+*.key
+id_ed25519*
+id_rsa*
+.minorsafe.lock

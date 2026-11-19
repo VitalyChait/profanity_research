@@ -8,24 +8,37 @@ description: >-
 
 # Running MinorSafe on a Remote Linux GPU Server
 
-Use these verified commands instead of stale targets in `Makefile` or `docs/RUNBOOK.md`.
+Supports both **automated execution over University VPN** (from your local workstation via gitignored `.remote.env`) and **manual activation** directly on the server. See `docs/RUNBOOK.md` for full details.
 
-## 1. Environment Bootstrap (CUDA 12.x + uv)
+## 0. Automated Remote Execution Over University VPN
 
-`scripts/setup_server.sh` creates the Python 3.11 `.venv` and directories, but only installs `.[dev]` (CPU/base). Follow it with `make setup-gpu` (or `uv sync`) to install CUDA `torch`, `bitsandbytes`, and `vllm`:
+Connect to the University VPN, then create your gitignored `.remote.env` (never committed to this public repo) and install the pre-commit secret guard:
 
 ```bash
-bash scripts/setup_server.sh
-uv sync --extra gpu --extra vllm --extra dev
-source .venv/bin/activate
+cp .remote.env.example .remote.env
+chmod 600 .remote.env
+bash scripts/install_git_hooks.sh
+
+make remote-check                             # VPN TCP check + exclusivity (`who` + GPU idle)
+bash scripts/remote.sh setup-ssh-key          # optional: install SSH key for root
+make remote-setup                             # rsync + setup_server.sh + remote preflight
+bash scripts/remote.sh run main gpu_80gb --detach
+make remote-status                            # live ETA status, tmux, GPUs, latest log tail
+make remote-logs                              # follow results/logs/latest.log
+make remote-pull                              # rsync results/ back (excludes *.safetensors, *.pt)
 ```
 
-Set HuggingFace credentials and cache path (use fast scratch/persistent storage for checkpoints):
+## 1. Manual Activation & Bootstrap (On Server)
 
 ```bash
+# Quick manual activation + preflight checks (sources .remote.env if present, activates .venv)
+source scripts/activate.sh auto
+
+# First-time bootstrap (installs uv if missing, runs `uv sync --extra gpu --extra vllm --extra dev`, runs info)
 export HF_TOKEN="hf_your_token_here"
 export HF_HOME="/scratch/$USER/hf_cache"
-export TOKENIZERS_PARALLELISM="false"
+bash scripts/setup_server.sh
+source scripts/activate.sh auto
 ```
 
 ## 2. Pre-Flight Verification & Model Download
@@ -33,6 +46,7 @@ export TOKENIZERS_PARALLELISM="false"
 Available GPU profiles in `configs/hardware/`: `gpu_24gb`, `gpu_48gb`, `gpu_80gb`, `multi_gpu_80gb`.
 
 ```bash
+minorsafe preflight --hardware gpu_80gb
 minorsafe info --profile gpu_80gb
 python scripts/download_models.py --profile gpu_80gb --dry-run
 python scripts/download_models.py --profile gpu_80gb --verify
@@ -47,25 +61,25 @@ bash scripts/run_phase.sh data
 # Equivalent: minorsafe data build (or make data)
 ```
 
-## 4. Running Experiments
+## 4. Running Experiments (with Preflight & Smart Logging)
 
-### Single Node (`tmux` / `screen`)
-
-Run phases via `scripts/run_phase.sh <phase> <profile>` (`main_grid`, `recomposition`, `subculture_audit`, `ramp_up`, `quant_grid`, `multiturn`, `analyze`):
+`scripts/run_phase.sh <phase> <profile>` runs `minorsafe preflight`, logs batch ETAs + `live_status.json` + `events.jsonl`, and samples GPU telemetry to `results/logs/*.gpu.csv`.
 
 ```bash
-bash scripts/run_phase.sh main_grid gpu_80gb
+bash scripts/run_phase.sh main gpu_80gb
+bash scripts/run_phase.sh guards gpu_80gb
 bash scripts/run_phase.sh recomposition gpu_80gb
-bash scripts/run_phase.sh subculture_audit gpu_80gb
-bash scripts/run_phase.sh ramp_up gpu_80gb
-bash scripts/run_phase.sh quant_grid gpu_80gb
+bash scripts/run_phase.sh subculture gpu_80gb
+bash scripts/run_phase.sh rampup gpu_80gb
+bash scripts/run_phase.sh quant gpu_80gb
 ```
 
 ### SLURM Job Array
 
-`scripts/slurm/run_grid.sbatch` runs array tasks `0-4` (`main_grid`, `recomposition`, `subculture_audit`, `ramp_up`, `quant_grid`):
+`scripts/slurm/run_grid.sbatch` runs array tasks `0-5` (`main guards recomposition subculture rampup quant`):
 
 ```bash
+mkdir -p results/logs
 sbatch --export=ALL,PROFILE=gpu_80gb scripts/slurm/run_grid.sbatch
 ```
 
@@ -80,6 +94,6 @@ bash scripts/run_phase.sh analyze
 
 ## Known Repo Gotchas
 
-- **Aligned `Makefile` / CLI / `run_phase.sh` targets**: `make smoke`, `make data`, `make main`, and `scripts/run_phase.sh` phase aliases (`rampup`/`ramp_up`, `guards`, `main`/`main_grid`, `recomposition`, `subculture`/`subculture_audit`, `quant`/`quant_grid`, `multiturn`, `analyze`) are aligned and verified by `tests/unit/test_cli_entrypoints.py`. Notice `setup_server.sh` now also runs `uv sync --extra gpu --extra vllm --extra dev`, and `scripts/slurm/run_grid.sbatch` maps tasks `0-5` across the benchmark phases.
+- **Aligned `Makefile` / CLI / `run_phase.sh` targets**: `make smoke`, `make data`, `make preflight`, `make main`, `make remote-*`, and `scripts/run_phase.sh` phase aliases (`rampup`/`ramp_up`, `guards`, `main`/`main_grid`, `recomposition`, `subculture`/`subculture_audit`, `quant`/`quant_grid`, `multiturn`, `analyze`) are aligned and verified by `tests/unit/test_cli_entrypoints.py`.
+- **Exclusivity guard**: CUDA runs (`run_experiment` and `run_phase.sh`) abort if another user is logged in (`who`), a foreign GPU compute process is active, or `.minorsafe.lock` is held. Pass `--allow-busy` to `preflight` or set `MINORSAFE_ALLOW_BUSY=1` (`REQUIRE_EXCLUSIVE=0` in `.remote.env`) only when intentionally sharing.
 - **Fail-closed placeholder guard (`src/minorsafe/placeholders.py`)**: GPU profiles set `allow_placeholders: false` (default). Running `capability_eval` (`main_grid.yaml`) or placeholder-backed methods (`m1_encoder_guard`, `m1_decoder_guard`, `m2_lora`, `mlm_substitute` action) or `eval` with `judge_backend: vllm|hf` / `ppl_model` raises `PlaceholderBackendError` until real GPU implementations replace those placeholders.
-

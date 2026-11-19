@@ -2,12 +2,14 @@
 
 from minorsafe.telemetry.cost import SetupReport, break_even, efficiency
 from minorsafe.telemetry.gpu import GPUSampler
+from minorsafe.telemetry.logger import SmartRunLogger
 from minorsafe.telemetry.timer import Stopwatch, TimingLogitsProcessor, cuda_sync
 from minorsafe.telemetry.tokens import TokenUsage
 
 __all__ = [
     "GPUSampler",
     "SetupReport",
+    "SmartRunLogger",
     "Stopwatch",
     "TimingLogitsProcessor",
     "TokenUsage",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -15,9 +16,9 @@ from minorsafe.config import load_age_bands, load_data_spec, load_hardware
 from minorsafe.data.build import build_dataset
 from minorsafe.eval.evaluate import evaluate_responses_df
 from minorsafe.eval.judge import compute_human_agreement, export_human_annotation_sheet
-from minorsafe.hardware import gpu_summary, resolve_profile_name
+from minorsafe.hardware import gpu_summary, resolve_profile_name, run_preflight_checks
 from minorsafe.runner.run import run_experiment, run_smoke_pipeline
-from minorsafe.utils import DATA_DIR, RESULTS_DIR, write_json
+from minorsafe.utils import DATA_DIR, RESULTS_DIR, read_json, write_json
 
 app = typer.Typer(
     name="minorsafe",
@@ -51,6 +52,67 @@ def cmd_info(hardware: str = _hardware_option()) -> None:
     hw = load_hardware(resolve_profile_name(hardware))
     typer.echo(f"Hardware Profile: {hw.name} ({hw.device}); allow_placeholders={hw.allow_placeholders}")
     typer.echo(f"Detected Hardware: {gpu_summary()}")
+
+
+@app.command("preflight")
+def cmd_preflight(
+    hardware: str = _hardware_option(),
+    allow_busy: bool = typer.Option(
+        False, "--allow-busy", help="Do not fail if another user or GPU process is active."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON preflight report."),
+) -> None:
+    """Run initial hardware, CUDA, server exclusivity, secret safety, disk, and HF auth checks."""
+    rep = run_preflight_checks(profile_name=hardware, require_exclusive=not allow_busy)
+    if as_json:
+        typer.echo(json.dumps(rep, indent=2))
+        raise typer.Exit(0 if rep["ok"] else 1)
+
+    typer.echo(
+        f"[PASS] Profile: {rep['profile']} (device={rep['device']}, "
+        f"allow_placeholders={rep['allow_placeholders']})"
+    )
+    cuda = rep["cuda"]
+    gpus = rep["gpus"]
+    typer.echo(
+        f"[{'PASS' if (rep['device'] == 'cpu' or cuda['available']) else 'FAIL'}] "
+        f"CUDA: available={cuda['available']} gpus={len(gpus)} bf16={cuda['bf16_supported']}"
+    )
+    for g in gpus:
+        typer.echo(
+            f"       GPU {g['index']}: {g['name']} | mem={g['memory_used_mb']}/{g['memory_total_mb']}MB "
+            f"| util={g['utilization_pct']}% | temp={g['temperature_c']}C"
+        )
+    excl = rep["exclusivity"]
+    excl_tag = "PASS" if excl["exclusive"] else ("WARN" if allow_busy else "FAIL")
+    typer.echo(
+        f"[{excl_tag}] Exclusivity: exclusive={excl['exclusive']} "
+        f"(gpu_procs={len(excl['gpu_processes'])}, other_users={excl['other_logged_in_users']})"
+    )
+    cred = rep["credential_safety"]
+    typer.echo(
+        f"[{'PASS' if cred['ok'] else 'FAIL'}] Secrets: .remote.env exists={cred['env_exists']} "
+        f"gitignored={cred['gitignored']} tracked={cred['tracked']} mode={cred['mode_octal']}"
+    )
+    disk = rep["disk"]
+    typer.echo(
+        f"[PASS] Disk free: repo={disk['repo_free_gb']}GB, HF_HOME={disk['hf_free_gb']}GB ({disk['hf_home']})"
+    )
+    hf = rep["hf_auth"]
+    hf_tag = "PASS" if (hf["token_present"] or not hf["gated_models"]) else "WARN"
+    typer.echo(
+        f"[{hf_tag}] HF Auth: token_present={hf['token_present']} gated_models={len(hf['gated_models'])}"
+    )
+    for w in rep["warnings"]:
+        typer.echo(f"[WARN] {w}")
+    for e in rep["errors"]:
+        typer.echo(f"[FAIL] {e}", err=True)
+
+    if rep["ok"]:
+        typer.echo("Preflight PASSED.")
+        raise typer.Exit(0)
+    typer.echo(f"Preflight FAILED ({len(rep['errors'])} error(s)).", err=True)
+    raise typer.Exit(1)
 
 
 @data_app.command("build")
@@ -145,7 +207,18 @@ def cmd_tomography(hardware: str = _hardware_option()) -> None:
 
 @app.command("status")
 def cmd_status(runs_dir: Path = typer.Option(RESULTS_DIR / "runs", "--runs", "--runs-dir")) -> None:
-    """Count completed run shards per experiment under results/runs/."""
+    """Show live run progress (if any) and count completed run shards under results/runs/."""
+    live_path = runs_dir.parent / "logs" / "live_status.json"
+    if live_path.exists():
+        try:
+            st = read_json(live_path)
+            typer.echo(
+                f"[LIVE] experiment={st.get('experiment')} state={st.get('state')} "
+                f"run={st.get('run_idx')}/{st.get('total_runs')} ({st.get('run_id')}) "
+                f"progress={st.get('progress')} eta_s={st.get('eta_s')} updated={st.get('updated_at')}"
+            )
+        except Exception:
+            pass
     if not runs_dir.exists():
         typer.echo(f"No runs under {runs_dir}.")
         return

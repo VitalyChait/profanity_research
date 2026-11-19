@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Automated remote GPU server workflow (designed for a server behind a University VPN).
+# Reads gitignored credentials from .remote.env (override path via REMOTE_ENV_FILE).
+#
+# Usage:
+#   bash scripts/remote.sh <subcommand> [args...]
+# Subcommands:
+#   check                        Verify VPN reachability, GPU idle status, and no other active users
+#   setup-ssh-key                Generate (if needed) and install an SSH key onto the remote host
+#   sync                         Rsync code/configs to REMOTE_DIR (never uploads .remote.env or secrets)
+#   setup                        Sync repo, bootstrap .venv + GPU deps, and run remote preflight
+#   preflight [profile]          Run `minorsafe preflight` on the remote host
+#   run <phase> [profile] [--detach]
+#                                Sync and execute a phase via scripts/run_phase.sh (optionally in tmux)
+#   status                       Show remote live status, tmux sessions, GPU utilization, and log tail
+#   logs                         Stream remote results/logs/latest.log
+#   pull                         Rsync results/ back from the remote server (excluding weights)
+#
+# Set DRY_RUN=1 to print commands without connecting to the server.
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
+
+SUBCMD="${1:-}"
+if [[ -z "${SUBCMD}" ]]; then
+    echo "Usage: bash scripts/remote.sh {check|setup-ssh-key|sync|setup|preflight|run|status|logs|pull} ..." >&2
+    exit 1
+fi
+shift
+
+ENV_FILE="${REMOTE_ENV_FILE:-${REPO_ROOT}/.remote.env}"
+if [[ -n "${REMOTE_ENV_FILE:-}" ]] && [[ ! -f "${ENV_FILE}" ]]; then
+    echo "[remote] ERROR: REMOTE_ENV_FILE does not exist: ${ENV_FILE}" >&2
+    exit 1
+fi
+
+# Guard public repository against leaking credentials.
+if command -v git >/dev/null 2>&1 && [[ -d "${REPO_ROOT}/.git" ]]; then
+    if ! git -C "${REPO_ROOT}" check-ignore -q .remote.env; then
+        echo "[remote] ERROR: .remote.env is NOT gitignored! Aborting to protect public repo." >&2
+        exit 1
+    fi
+    if git -C "${REPO_ROOT}" ls-files --error-unmatch .remote.env >/dev/null 2>&1; then
+        echo "[remote] ERROR: .remote.env is tracked in git! Run: git rm --cached .remote.env" >&2
+        exit 1
+    fi
+fi
+
+if [[ -f "${ENV_FILE}" ]]; then
+    # Enforce owner-only permissions on credential file
+    chmod 600 "${ENV_FILE}" 2>/dev/null || true
+    set -a
+    # shellcheck disable=SC1090
+    source "${ENV_FILE}"
+    set +a
+elif [[ "${DRY_RUN:-0}" != "1" ]] && [[ -z "${REMOTE_HOST:-}" ]]; then
+    echo "[remote] ERROR: Missing ${ENV_FILE}. Run: cp .remote.env.example .remote.env && chmod 600 .remote.env" >&2
+    exit 1
+fi
+
+REMOTE_HOST="${REMOTE_HOST:-gpu-server.university.edu}"
+REMOTE_PORT="${REMOTE_PORT:-22}"
+REMOTE_USER="${REMOTE_USER:-root}"
+REMOTE_DIR="${REMOTE_DIR:-/root/profanity_research}"
+REMOTE_PROFILE="${REMOTE_PROFILE:-auto}"
+VPN_CHECK_TIMEOUT="${VPN_CHECK_TIMEOUT:-5}"
+REQUIRE_EXCLUSIVE="${REQUIRE_EXCLUSIVE:-1}"
+MAX_IDLE_GPU_MEM_MB="${MAX_IDLE_GPU_MEM_MB:-500}"
+MAX_IDLE_GPU_UTIL_PCT="${MAX_IDLE_GPU_UTIL_PCT:-10}"
+REMOTE_TARGET="${REMOTE_USER}@${REMOTE_HOST}"
+
+# Build SSH & rsync transport arrays.
+SSH_OPTS=(
+    -p "${REMOTE_PORT}"
+    -o "ConnectTimeout=${VPN_CHECK_TIMEOUT}"
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=4
+)
+if [[ -n "${REMOTE_SSH_KEY:-}" ]] && [[ -f "${REMOTE_SSH_KEY}" ]]; then
+    SSH_OPTS+=(-i "${REMOTE_SSH_KEY}")
+fi
+
+RSYNC_SSH="ssh -p ${REMOTE_PORT} -o ConnectTimeout=${VPN_CHECK_TIMEOUT} -o ServerAliveInterval=30 -o ServerAliveCountMax=4"
+if [[ -n "${REMOTE_SSH_KEY:-}" ]] && [[ -f "${REMOTE_SSH_KEY}" ]]; then
+    RSYNC_SSH+=" -i ${REMOTE_SSH_KEY}"
+fi
+
+AUTH_PREFIX=()
+if [[ -n "${REMOTE_PASSWORD:-}" ]]; then
+    if [[ "${DRY_RUN:-0}" != "1" ]] && ! command -v sshpass >/dev/null 2>&1; then
+        echo "[remote] ERROR: REMOTE_PASSWORD is set but 'sshpass' is not installed (or switch to SSH keys via setup-ssh-key)." >&2
+        exit 1
+    fi
+    export SSHPASS="${REMOTE_PASSWORD}"
+    AUTH_PREFIX=(sshpass -e)
+elif [[ -n "${REMOTE_PASSWORD_FILE:-}" ]]; then
+    if [[ "${DRY_RUN:-0}" != "1" ]] && ! command -v sshpass >/dev/null 2>&1; then
+        echo "[remote] ERROR: REMOTE_PASSWORD_FILE is set but 'sshpass' is not installed." >&2
+        exit 1
+    fi
+    AUTH_PREFIX=(sshpass -f "${REMOTE_PASSWORD_FILE}")
+fi
+
+check_vpn_reachable() {
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        echo "[remote] DRY_RUN: tcp check ${REMOTE_HOST}:${REMOTE_PORT} (timeout=${VPN_CHECK_TIMEOUT}s)"
+        return 0
+    fi
+    if ! python3 -c "import socket, sys; s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=float(sys.argv[3])); s.close()" "${REMOTE_HOST}" "${REMOTE_PORT}" "${VPN_CHECK_TIMEOUT}" 2>/dev/null; then
+        echo "[remote] ERROR: Cannot reach ${REMOTE_HOST}:${REMOTE_PORT} (timeout ${VPN_CHECK_TIMEOUT}s). Ensure the University VPN is connected and REMOTE_HOST/REMOTE_PORT in .remote.env are correct." >&2
+        exit 1
+    fi
+}
+
+run_ssh() {
+    local remote_cmd="$1"
+    local cmd=("${AUTH_PREFIX[@]}" ssh "${SSH_OPTS[@]}" "${REMOTE_TARGET}" "${remote_cmd}")
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        printf '[remote] DRY_RUN: '
+        printf '%q ' "${cmd[@]}"
+        echo
+        return 0
+    fi
+    check_vpn_reachable
+    "${cmd[@]}"
+}
+
+run_rsync_push() {
+    local cmd=(
+        "${AUTH_PREFIX[@]}" rsync -az --delete
+        -e "${RSYNC_SSH}"
+        --exclude=.git/
+        --exclude=.venv/
+        --exclude=.remote.env
+        --exclude='.remote.env.*'
+        --exclude=.secrets/
+        --exclude='*.pem'
+        --exclude='*.key'
+        --exclude='id_ed25519*'
+        --exclude='id_rsa*'
+        --exclude=.minorsafe.lock
+        --exclude=data/
+        --exclude=results/
+        --exclude=models_cache/
+        --exclude=__pycache__/
+        --exclude=.pytest_cache/
+        --exclude=.ruff_cache/
+        "${REPO_ROOT}/" "${REMOTE_TARGET}:${REMOTE_DIR}/"
+    )
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        printf '[remote] DRY_RUN: '
+        printf '%q ' "${cmd[@]}"
+        echo
+        return 0
+    fi
+    check_vpn_reachable
+    "${AUTH_PREFIX[@]}" ssh "${SSH_OPTS[@]}" "${REMOTE_TARGET}" "mkdir -p '${REMOTE_DIR}'"
+    "${cmd[@]}"
+}
+
+# Build safe remote env exports (without printing secrets in DRY_RUN)
+remote_env_prefix() {
+    local parts="export TOKENIZERS_PARALLELISM=false"
+    if [[ -n "${HF_HOME:-}" ]]; then
+        parts+=" HF_HOME=$(printf '%q' "${HF_HOME}")"
+    fi
+    if [[ -n "${HF_TOKEN:-}" ]]; then
+        if [[ "${DRY_RUN:-0}" == "1" ]]; then
+            parts+=" HF_TOKEN=***"
+        else
+            parts+=" HF_TOKEN=$(printf '%q' "${HF_TOKEN}")"
+        fi
+    fi
+    if [[ "${REQUIRE_EXCLUSIVE}" == "0" ]]; then
+        parts+=" MINORSAFE_ALLOW_BUSY=1"
+    fi
+    echo "${parts};"
+}
+
+case "${SUBCMD}" in
+    check)
+        # Validate VPN connectivity, active users (`who`), GPU utilization/processes, and disk space.
+        REMOTE_CHECK_SCRIPT="$(cat <<EOF
+echo "Host: \$(hostname) | User: \$(whoami) | Date: \$(date -Iseconds)"
+echo "--- Disk ---"
+df -h "\$( [ -d '${REMOTE_DIR}' ] && echo '${REMOTE_DIR}' || echo / )" | tail -n 1
+echo "--- Logged-in users (who) ---"
+WHO_OUT="\$(who || true)"
+echo "\${WHO_OUT:-<none>}"
+OTHER_USERS="\$(echo "\${WHO_OUT}" | awk -v me="\$(whoami)" 'NF>0 && \$1!=me {print \$1}' | sort -u)"
+echo "--- GPUs ---"
+BUSY=0
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader
+    APPS="\$(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits || true)"
+    echo "Compute apps: \${APPS:-<none>}"
+    if [[ -n "\${APPS}" ]]; then BUSY=1; fi
+    while IFS=, read -r _idx _name mem_used _mem_tot util _temp; do
+        mem_used="\$(echo "\${mem_used:-0}" | xargs | cut -d. -f1)"
+        util="\$(echo "\${util:-0}" | xargs | cut -d. -f1)"
+        if [[ "\${mem_used:-0}" -gt "${MAX_IDLE_GPU_MEM_MB}" ]] || [[ "\${util:-0}" -gt "${MAX_IDLE_GPU_UTIL_PCT}" ]]; then
+            BUSY=1
+        fi
+    done < <(nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader,nounits)
+else
+    echo "nvidia-smi not found"
+fi
+if [[ "${REQUIRE_EXCLUSIVE}" == "1" ]]; then
+    if [[ -n "\${OTHER_USERS}" ]]; then
+        echo "ERROR: Other user(s) logged in: \${OTHER_USERS}" >&2
+        exit 2
+    fi
+    if [[ "\${BUSY}" == "1" ]]; then
+        echo "ERROR: GPU is currently in use (active compute apps or exceeds idle threshold)." >&2
+        exit 2
+    fi
+fi
+echo "Server exclusivity check PASSED."
+EOF
+)"
+        run_ssh "${REMOTE_CHECK_SCRIPT}"
+        ;;
+
+    setup-ssh-key)
+        KEY_PATH="${REMOTE_SSH_KEY:-${HOME}/.ssh/id_ed25519_minorsafe}"
+        if [[ "${DRY_RUN:-0}" == "1" ]]; then
+            echo "[remote] DRY_RUN: ensure key ${KEY_PATH} and install ${KEY_PATH}.pub into ${REMOTE_TARGET}:~/.ssh/authorized_keys"
+            exit 0
+        fi
+        check_vpn_reachable
+        if [[ ! -f "${KEY_PATH}" ]]; then
+            mkdir -p "$(dirname "${KEY_PATH}")"
+            chmod 700 "$(dirname "${KEY_PATH}")"
+            ssh-keygen -t ed25519 -f "${KEY_PATH}" -N "" -C "minorsafe@$(hostname)"
+        fi
+        PUB_KEY="$(cat "${KEY_PATH}.pub")"
+        "${AUTH_PREFIX[@]}" ssh "${SSH_OPTS[@]}" "${REMOTE_TARGET}" \
+            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && grep -qxF $(printf '%q' "${PUB_KEY}") ~/.ssh/authorized_keys || printf '%s\n' $(printf '%q' "${PUB_KEY}") >> ~/.ssh/authorized_keys"
+        echo "[remote] Installed SSH public key ${KEY_PATH}.pub on ${REMOTE_TARGET}"
+        ;;
+
+    sync)
+        run_rsync_push
+        ;;
+
+    setup)
+        run_rsync_push
+        ENV_PRE="$(remote_env_prefix)"
+        run_ssh "${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/setup_server.sh && .venv/bin/python -m minorsafe.cli preflight --hardware '${REMOTE_PROFILE}'$( [[ "${REQUIRE_EXCLUSIVE}" == "0" ]] && echo ' --allow-busy' || true )"
+        ;;
+
+    preflight)
+        PROF="${1:-${REMOTE_PROFILE}}"
+        ENV_PRE="$(remote_env_prefix)"
+        ALLOW_FLAG=""
+        if [[ "${REQUIRE_EXCLUSIVE}" == "0" ]]; then
+            ALLOW_FLAG=" --allow-busy"
+        fi
+        run_ssh "${ENV_PRE} cd '${REMOTE_DIR}' && .venv/bin/python -m minorsafe.cli preflight --hardware '${PROF}'${ALLOW_FLAG}"
+        ;;
+
+    run)
+        PHASE="${1:-}"
+        if [[ -z "${PHASE}" ]]; then
+            echo "Usage: bash scripts/remote.sh run <phase> [profile] [--detach]" >&2
+            exit 1
+        fi
+        shift
+        RUN_PROFILE="${REMOTE_PROFILE}"
+        DETACH_MODE="${DETACH:-0}"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --detach) DETACH_MODE="1" ;;
+                *) RUN_PROFILE="$1" ;;
+            esac
+            shift
+        done
+        run_rsync_push
+        ENV_PRE="$(remote_env_prefix)"
+        RUN_CMD="${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/run_phase.sh '${PHASE}' '${RUN_PROFILE}'"
+        if [[ "${DETACH_MODE}" == "1" ]]; then
+            SESSION="minorsafe_${PHASE}"
+            DETACH_SCRIPT="$(cat <<EOF
+mkdir -p '${REMOTE_DIR}/results/logs'
+if command -v tmux >/dev/null 2>&1; then
+    tmux kill-session -t '${SESSION}' 2>/dev/null || true
+    tmux new-session -d -s '${SESSION}' bash -lc $(printf '%q' "${RUN_CMD}")
+    echo "[remote] Started detached tmux session '${SESSION}'. Monitor with: bash scripts/remote.sh logs"
+else
+    nohup bash -lc $(printf '%q' "${RUN_CMD}") > '${REMOTE_DIR}/results/logs/${PHASE}_detached.log' 2>&1 < /dev/null &
+    echo "[remote] Started detached nohup PID \$!. Monitor with: bash scripts/remote.sh logs"
+fi
+EOF
+)"
+            run_ssh "${DETACH_SCRIPT}"
+        else
+            run_ssh "${RUN_CMD}"
+        fi
+        ;;
+
+    status)
+        run_ssh "cd '${REMOTE_DIR}' && ( .venv/bin/python -m minorsafe.cli status || true ) && echo '--- tmux ---' && ( tmux ls 2>/dev/null || echo 'no tmux sessions' ) && echo '--- GPUs ---' && ( nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader 2>/dev/null || echo 'no nvidia-smi' ) && echo '--- latest log ---' && ( [ -f results/logs/latest.log ] && tail -n 15 results/logs/latest.log || echo 'no logs yet' )"
+        ;;
+
+    logs)
+        run_ssh "tail -n 50 -f '${REMOTE_DIR}/results/logs/latest.log'"
+        ;;
+
+    pull)
+        mkdir -p "${REPO_ROOT}/results"
+        cmd=(
+            "${AUTH_PREFIX[@]}" rsync -avz
+            -e "${RSYNC_SSH}"
+            --exclude='*.safetensors'
+            --exclude='*.pt'
+            "${REMOTE_TARGET}:${REMOTE_DIR}/results/" "${REPO_ROOT}/results/"
+        )
+        if [[ "${DRY_RUN:-0}" == "1" ]]; then
+            printf '[remote] DRY_RUN: '
+            printf '%q ' "${cmd[@]}"
+            echo
+            exit 0
+        fi
+        check_vpn_reachable
+        "${cmd[@]}"
+        ;;
+
+    *)
+        echo "Unknown subcommand: ${SUBCMD}" >&2
+        echo "Valid subcommands: check setup-ssh-key sync setup preflight run status logs pull" >&2
+        exit 1
+        ;;
+esac
