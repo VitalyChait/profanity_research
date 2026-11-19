@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from minorsafe.data.schema import Example, load_examples, load_pairs
 from minorsafe.eval.evaluate import evaluate_responses_df
 from minorsafe.eval.judge import export_human_annotation_sheet
 from minorsafe.methods.base import MethodOutput, RunContext, create_method
+from minorsafe.placeholders import require_real_backend
 from minorsafe.runner.grid import RunSpec, expand_experiment_grid, verify_split_guardrail
 from minorsafe.runner.store import RunStore
 from minorsafe.utils import DATA_DIR, RESULTS_DIR, write_json
@@ -34,15 +36,17 @@ def _output_to_row(
 ) -> dict[str, Any]:
     tok = out.tokens.to_dict()
     cat = ex.categories[0] if ex.categories else "benign"
-    return {
+    row: dict[str, Any] = {
         "run_id": rspec.run_id,
         "experiment": rspec.experiment,
         "method": rspec.label or rspec.method_spec.name,
+        "method_base": rspec.method_spec.name,
+        "method_params": json.dumps(rspec.method_params, sort_keys=True, default=str),
         "method_kind": rspec.method_spec.kind,
         "model": gen_spec.alias,
         "family": gen_spec.family,
         "size_group": gen_spec.size_group or "S",
-        "params_b": float(gen_spec.params_b or 0.1),
+        "params_b": float(gen_spec.params_b) if gen_spec.params_b is not None else float("nan"),
         "quant": rspec.quant,
         "age_band": rspec.age_band,
         "seed": seed,
@@ -55,7 +59,8 @@ def _output_to_row(
         "raw_text": out.raw_text,
         "blocked": out.blocked,
         "action_taken": out.action_taken,
-        "guard_score": out.guard_score if out.guard_score is not None else 0.0,
+        # NaN (not 0.0) when the method is not a detector, so it cannot leak into AUROC/F1.
+        "guard_score": out.guard_score if out.guard_score is not None else float("nan"),
         **tok,
         "ttft_ms": out.ttft_ms,
         "e2e_ms": out.e2e_ms,
@@ -64,6 +69,11 @@ def _output_to_row(
         "energy_j": out.energy_j,
         "peak_vram_mb": out.peak_vram_mb,
     }
+    # Persist scalar method telemetry (hook intervention rate, probe score, ...) as x_* columns.
+    for k, v in (out.extra or {}).items():
+        if isinstance(v, (bool, int, float, str)):
+            row[f"x_{k}"] = v
+    return row
 
 
 def run_experiment(
@@ -106,6 +116,11 @@ def run_experiment(
     specs = expand_experiment_grid(exp, profile, models)
     exp_runs_dir = (runs_root or (RESULTS_DIR / "runs")) / exp.name
     completed_dirs: list[Path] = []
+
+    if exp.capability_eval:
+        # Capability retention (tinyMMLU / tinyGSM8K) is not wired into the runner yet; do not let the
+        # config flag silently do nothing on profiles used for reported results.
+        require_real_backend(profile, "capability_eval", "tinyMMLU/tinyGSM8K retention is not wired into the runner")
 
     for rspec in specs:
         run_dir = exp_runs_dir / rspec.run_id
@@ -196,6 +211,6 @@ def run_smoke_pipeline(work_dir: Path, max_examples: int = 6) -> pd.DataFrame:
 
     summary_df = aggregate_experiment_results(runs_dir / "smoke", results_dir)
     generate_all_figures(summary_df, results_dir / "figures")
-    generate_all_tables(summary_df, results_dir / "tables")
-    generate_executive_report(summary_df, results_dir)
+    generate_all_tables(summary_df, results_dir / "tables", responses_df=combined_df)
+    generate_executive_report(summary_df, results_dir, responses_df=combined_df)
     return summary_df

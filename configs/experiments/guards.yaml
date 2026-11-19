@@ -1,0 +1,35 @@
+name: guards
+description: "Stage 7.4 guard & probe moderation benchmark on held-out safety, obfuscation, slang and over-refusal test sets."
+split: test
+categories: ["profanity", "obfuscated", "sexual", "violence", "self_harm", "drugs", "slang", "benign_tricky", "benign"]
+seeds: [0]
+age_bands: ["teen_12_18"]
+temperature: 0.0
+warmup_queries: 2
+evaluate: true
+capability_eval: false
+# Detection quality is what this stage measures; one generator tier keeps generation cost bounded.
+runs:
+  - method: m1_encoder_guard
+    generators: ["M"]
+    params:
+      train_mode: zeroshot
+      action: fallback
+    label: m1_enc_zeroshot
+  - method: m1_encoder_guard
+    generators: ["M"]
+    params:
+      train_mode: finetuned
+      action: fallback
+    label: m1_enc_finetuned
+  - method: m1_decoder_guard
+    generators: ["M"]
+    params:
+      action: fallback
+    label: m1_dec
+  - method: m3_probe_guard
+    generators: ["M"]
+    params:
+      action: fallback
+    label: m3_probe
+

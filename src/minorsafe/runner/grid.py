@@ -84,7 +84,11 @@ def expand_experiment_grid(
                             },
                             length=8,
                         )
-                        label_part = group.label or base_method.name
+                        # Sweep variants must be distinguishable in results (e.g. the four M1 actions).
+                        sweep_suffix = ".".join(f"{k}-{v}" for k, v in zip(sweep_keys, combo, strict=True))
+                        auto_label = f"{base_method.name}.{sweep_suffix}" if sweep_suffix else None
+                        label = group.label or auto_label
+                        label_part = label or base_method.name
                         run_id = f"{label_part}__{gen_alias}__{quant}__{suffix_hash}"
                         specs.append(
                             RunSpec(
@@ -97,7 +101,7 @@ def expand_experiment_grid(
                                 seed=exp.seeds[0] if exp.seeds else 0,
                                 split=exp.split,
                                 method_params=merged_params,
-                                label=group.label,
+                                label=label,
                             )
                         )
     return specs

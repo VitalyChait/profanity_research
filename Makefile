@@ -1,6 +1,9 @@
-.PHONY: setup setup-gpu lint format test test-integration smoke data main analyze
+.PHONY: setup setup-gpu lint format test test-integration smoke data main rampup guards main-grid \
+	recomposition subculture quant multiturn analyze
 
 UV ?= uv
+# Hardware profile for GPU phases: a name in configs/hardware/ or "auto" (detect via nvidia-smi).
+PROFILE ?= auto
 
 setup:
 	$(UV) sync --extra cpu --extra dev
@@ -26,16 +29,31 @@ smoke:
 	$(UV) run minorsafe smoke --hardware cpu_debug
 
 data:
-	$(UV) run minorsafe data build --hardware auto
+	$(UV) run minorsafe data build
 
-main:
-	bash scripts/run_phase.sh data
-	bash scripts/run_phase.sh rampup
-	bash scripts/run_phase.sh guards
-	bash scripts/run_phase.sh main
-	bash scripts/run_phase.sh recomposition
-	bash scripts/run_phase.sh subculture
-	bash scripts/run_phase.sh analyze
+# Core single-turn benchmark (multiturn and quant are excluded by design; see plan.md Decision 5).
+main: data rampup guards main-grid recomposition subculture analyze
+
+rampup:
+	bash scripts/run_phase.sh rampup $(PROFILE)
+
+guards:
+	bash scripts/run_phase.sh guards $(PROFILE)
+
+main-grid:
+	bash scripts/run_phase.sh main $(PROFILE)
+
+recomposition:
+	bash scripts/run_phase.sh recomposition $(PROFILE)
+
+subculture:
+	bash scripts/run_phase.sh subculture $(PROFILE)
+
+quant:
+	bash scripts/run_phase.sh quant $(PROFILE)
+
+multiturn:
+	bash scripts/run_phase.sh multiturn $(PROFILE)
 
 analyze:
 	$(UV) run minorsafe analyze

@@ -10,6 +10,7 @@ from minorsafe.eval.judge import heuristic_judge_score
 from minorsafe.eval.readability import compute_readability_metrics
 from minorsafe.eval.safety import compute_safety_metrics
 from minorsafe.eval.semantic import compute_recomposition_metrics
+from minorsafe.placeholders import PlaceholderBackendError
 
 
 def compute_success_flag(
@@ -29,6 +30,24 @@ def compute_success_flag(
     return bool((not is_refusal) and (helpful >= 3) and (meaning_preserved >= 3))
 
 
+def _check_eval_backends(eval_settings: EvalSettings) -> None:
+    """Fail closed when the config requests an evaluator that is not implemented yet.
+
+    Previously the heuristic judge and heuristic perplexity were used regardless of configuration, so a GPU
+    profile requesting ``judge_backend: vllm`` / ``ppl_model: gpt2-large`` silently got placeholder numbers.
+    """
+    if eval_settings.judge_backend != "heuristic":
+        raise PlaceholderBackendError(
+            f"judge_backend={eval_settings.judge_backend!r} is not implemented (only the heuristic rubric "
+            "exists). Implement the LLM judge or set eval.judge_backend: heuristic on a debug profile."
+        )
+    if eval_settings.ppl_model is not None:
+        raise PlaceholderBackendError(
+            f"ppl_model={eval_settings.ppl_model!r} is not implemented (perplexity is currently a "
+            "repetition-based formula). Implement reference-LM PPL or set eval.ppl_model: null."
+        )
+
+
 def evaluate_responses_df(
     df: pd.DataFrame,
     eval_settings: EvalSettings | None = None,
@@ -38,6 +57,7 @@ def evaluate_responses_df(
     eval_settings = eval_settings or EvalSettings(
         toxicity_backend="lexicon", bertscore_model=None, ppl_model=None, judge_backend="heuristic"
     )
+    _check_eval_backends(eval_settings)
     records = df.to_dict(orient="records")
     evaluated: list[dict] = []
 

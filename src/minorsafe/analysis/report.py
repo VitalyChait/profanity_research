@@ -6,16 +6,19 @@ from pathlib import Path
 
 import pandas as pd
 
-from minorsafe.analysis.tables import _df_to_markdown, evaluate_hypotheses
+from minorsafe.analysis.hypotheses import evaluate_hypotheses
+from minorsafe.analysis.tables import _df_to_markdown
 
 
-def generate_executive_report(summary_df: pd.DataFrame, out_dir: Path) -> Path:
+def generate_executive_report(
+    summary_df: pd.DataFrame, out_dir: Path, responses_df: pd.DataFrame | None = None
+) -> Path:
     """Create results/REPORT.md with benchmark summary, raw token/time accounting, and H1-H10 verdicts."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     report_path = out_dir / "REPORT.md"
 
-    verdicts_df = pd.DataFrame(evaluate_hypotheses(summary_df))
+    verdicts_df = pd.DataFrame(evaluate_hypotheses(summary_df, responses_df=responses_df))
     cols = [
         c
         for c in (
@@ -42,6 +45,9 @@ All cost metrics are reported strictly in **raw token counts (`tok_total_mean`, 
 {bench_md}
 
 ## 3. Pre-Registered Hypothesis Verdicts (`H1`–`H10`)
+Verdicts are computed from the data by the decision rules in `minorsafe/analysis/hypotheses.py`
+(`SUPPORTED` / `NOT_SUPPORTED` / `MIXED` across matched cells, or `NOT_EVALUATED` with the reason).
+
 {hyp_md}
 """
     report_path.write_text(content, encoding="utf-8")

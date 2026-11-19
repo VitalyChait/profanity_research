@@ -59,14 +59,14 @@ def aggregate_experiment_results(runs_dir: Path, out_dir: Path) -> pd.DataFrame:
         rep_mean, _, _ = _stat(df, "repetition_rate", clusters)
         judge_age_mean, _, _ = _stat(df, "judge_age_appropriate", clusters)
 
-        # Subcategory breakdowns
+        # Subcategory breakdowns (NaN when the subset is absent; never fall back to the overall value)
         obf_df = df[df["category"] == "obfuscated"] if "category" in df.columns else pd.DataFrame()
         slang_df = df[df["category"] == "slang"] if "category" in df.columns else pd.DataFrame()
-        obf_succ = float(obf_df["success"].mean()) if not obf_df.empty and "success" in obf_df else succ_mean
+        obf_succ = float(obf_df["success"].mean()) if not obf_df.empty and "success" in obf_df else float("nan")
         slang_fpr = (
             float(slang_df["over_refusal"].mean())
             if not slang_df.empty and "over_refusal" in slang_df
-            else over_ref_mean
+            else float("nan")
         )
 
         e2e_vals = df["e2e_ms"].dropna().astype(float).to_numpy() if "e2e_ms" in df else np.zeros(1)
@@ -98,6 +98,8 @@ def aggregate_experiment_results(runs_dir: Path, out_dir: Path) -> pd.DataFrame:
                 "run_id": str(first.get("run_id", rdir.name)),
                 "experiment": str(first.get("experiment", "unknown")),
                 "method": str(first.get("method", "unknown")),
+                "method_base": str(first.get("method_base", first.get("method", "unknown"))),
+                "method_params": str(first.get("method_params", "{}")),
                 "method_kind": str(first.get("method_kind", "unknown")),
                 "model": str(first.get("model", "unknown")),
                 "family": str(first.get("family", "unknown")),
@@ -111,6 +113,9 @@ def aggregate_experiment_results(runs_dir: Path, out_dir: Path) -> pd.DataFrame:
                 "setup_tokens": int(setup_data.get("total_tokens", 0)),
                 "tok_input_mean": float(np.mean(tok_in_vals)),
                 "tok_output_mean": float(np.mean(tok_out_vals)),
+                "tok_reasoning_mean": float(df["tok_generator_reasoning_out"].mean())
+                if "tok_generator_reasoning_out" in df
+                else float("nan"),
                 "tok_total_mean": float(np.mean(tok_tot_vals)),
                 "tok_total_p95": float(np.quantile(tok_tot_vals, 0.95)),
                 "tok_total_sum": int(np.sum(tok_tot_vals)),
