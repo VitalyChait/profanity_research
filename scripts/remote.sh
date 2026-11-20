@@ -12,9 +12,11 @@ set -euo pipefail
 #   sync                         Rsync code/configs to REMOTE_DIR (never uploads .remote.env or secrets)
 #   setup                        Sync repo, bootstrap .venv + GPU deps, and run remote preflight
 #   preflight [profile]          Run `minorsafe preflight` on the remote host
+#   test-all [profile] [flags]   Sync and execute full local/GPU verification suite (`run_all_tests.sh`)
+#   autopilot [profile] [flags]  Sync, validate setup/preflight/HF gates, then launch full unattended sequence in background
 #   run <phase> [profile] [--detach]
-#                                Sync and execute a phase via scripts/run_phase.sh (optionally in tmux)
-#   status                       Show remote live status, tmux sessions, GPU utilization, and log tail
+#                                Sync and execute a phase via scripts/run_phase.sh (optionally in tmux/nohup)
+#   status                       Show remote live status, autopilot state, GPU utilization, and log tail
 #   logs                         Stream remote results/logs/latest.log
 #   pull                         Rsync results/ back from the remote server (excluding weights)
 #
@@ -385,6 +387,13 @@ EOF
         run_ssh "${ENV_PRE} cd '${REMOTE_DIR}' && .venv/bin/python -m minorsafe.cli preflight --hardware '${PROF}'${ALLOW_FLAG}"
         ;;
 
+    check-gates)
+        PROF="${1:-${REMOTE_PROFILE}}"
+        run_rsync_push
+        ENV_PRE="$(remote_env_prefix "${PROF}")"
+        run_ssh "${ENV_PRE} cd '${REMOTE_DIR}' && .venv/bin/python scripts/download_models.py --profile '${PROF}' --check-gates"
+        ;;
+
     run)
         PHASE="${1:-}"
         if [[ -z "${PHASE}" ]]; then
@@ -417,8 +426,11 @@ if command -v tmux >/dev/null 2>&1; then
     tmux new-session -d -s '${SESSION}' bash -lc $(printf '%q' "${RUN_CMD}")
     echo "[remote] Started detached tmux session '${SESSION}'. Monitor with: bash scripts/remote.sh logs"
 else
-    nohup bash -lc $(printf '%q' "${RUN_CMD}") > '${REMOTE_DIR}/results/logs/${PHASE}_detached.log' 2>&1 < /dev/null &
-    echo "[remote] Started detached nohup PID \$!. Monitor with: bash scripts/remote.sh logs"
+    setsid nohup bash -lc $(printf '%q' "${RUN_CMD}") > '${REMOTE_DIR}/results/logs/${PHASE}_detached.log' 2>&1 < /dev/null &
+    DETACH_PID="\$!"
+    sleep 1
+    kill -0 "\${DETACH_PID}" 2>/dev/null || { echo "[remote] ERROR: Detached process exited immediately." >&2; exit 1; }
+    echo "[remote] Started detached PID \${DETACH_PID}. Safe to disconnect; monitor with: bash scripts/remote.sh status"
 fi
 EOF
 )"
@@ -437,7 +449,7 @@ EOF
         ;;
 
     status)
-        run_ssh "cd '${REMOTE_DIR}' && ( .venv/bin/python -m minorsafe.cli status || true ) && echo '--- tmux ---' && ( tmux ls 2>/dev/null || echo 'no tmux sessions' ) && echo '--- background procs ---' && ( pgrep -af 'minorsafe\\.cli|run_msba\\.sh|run_all_tests\\.sh' || echo 'no detached minorsafe procs' ) && echo '--- GPUs ---' && ( nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader 2>/dev/null || echo 'no nvidia-smi' ) && echo '--- latest log ---' && ( [ -f results/logs/latest.log ] && tail -n 15 results/logs/latest.log || echo 'no logs yet' )"
+        run_ssh "cd '${REMOTE_DIR}' && ( .venv/bin/python -m minorsafe.cli status || true ) && echo '--- autopilot ---' && ( [ -f results/logs/autopilot.status ] && cat results/logs/autopilot.status || echo 'no autopilot status' ) && echo '--- tmux ---' && ( tmux ls 2>/dev/null || echo 'no tmux sessions' ) && echo '--- background procs ---' && ( pgrep -af '[r]un_autopilot\.sh|[m]inorsafe\.cli|[r]un_msba\.sh|[r]un_all_tests\.sh|[r]un_phase\.sh' || echo 'no detached minorsafe procs' ) && echo '--- GPUs ---' && ( nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader 2>/dev/null || echo 'no nvidia-smi' ) && echo '--- latest log ---' && ( [ -f results/logs/latest.log ] && tail -n 15 results/logs/latest.log || echo 'no logs yet' )"
         ;;
 
     logs)
@@ -481,9 +493,95 @@ EOF
         run_ssh "${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/run_all_tests.sh '${PROF}' ${EXTRA_FLAGS}"
         ;;
 
+    autopilot)
+        PROF="${REMOTE_PROFILE}"
+        if [[ $# -ge 1 && "$1" != --* ]]; then
+            PROF="$1"
+            shift
+        fi
+        SKIP_SETUP=0
+        AUTO_ARGS=()
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --skip-setup) SKIP_SETUP=1 ;;
+                --skip-tests|--skip-download|--skip-pilot|--skip-quant|--with-tomography)
+                    AUTO_ARGS+=("$1")
+                    ;;
+                *)
+                    echo "Unknown autopilot option: $1" >&2
+                    echo "Usage: bash scripts/remote.sh autopilot [profile] [--skip-setup] [--skip-tests] [--skip-download] [--skip-pilot] [--skip-quant] [--with-tomography]" >&2
+                    exit 1
+                    ;;
+            esac
+            shift
+        done
+
+        run_rsync_push
+        ENV_PRE="$(remote_env_prefix "${PROF}")"
+        ALLOW_FLAG=""
+        if [[ "${REQUIRE_EXCLUSIVE}" == "0" ]]; then
+            ALLOW_FLAG=" --allow-busy"
+        fi
+
+        PRE_CMD="${ENV_PRE} cd '${REMOTE_DIR}'"
+        if [[ "${SKIP_SETUP}" == "0" ]]; then
+            PRE_CMD+=" && bash scripts/setup_server.sh"
+        fi
+        PRE_CMD+=" && .venv/bin/python -m minorsafe.cli preflight --hardware '${PROF}'${ALLOW_FLAG}"
+        PRE_CMD+=" && .venv/bin/python scripts/download_models.py --profile '${PROF}' --check-gates"
+
+        echo "[remote] Running pre-detach setup, preflight, and HF gated-repo check on ${REMOTE_HOST}..."
+        set +e
+        run_ssh "${PRE_CMD}"
+        PRE_RC=$?
+        set -e
+        if [[ "${PRE_RC}" -ne 0 ]]; then
+            echo "[remote] Pre-launch check failed (exit=${PRE_RC}); NOT starting unattended autopilot." >&2
+            pull_remote_logs
+            exit "${PRE_RC}"
+        fi
+
+        AUTO_CMD="${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/run_autopilot.sh '${PROF}'"
+        if [[ "${#AUTO_ARGS[@]}" -gt 0 ]]; then
+            for arg in "${AUTO_ARGS[@]}"; do
+                AUTO_CMD+=" $(printf '%q' "${arg}")"
+            done
+        fi
+
+        LAUNCH_SCRIPT="$(cat <<EOF
+set -euo pipefail
+mkdir -p '${REMOTE_DIR}/results/logs'
+PID_FILE='${REMOTE_DIR}/results/logs/autopilot.pid'
+if [ -f "\${PID_FILE}" ]; then
+    OLD_PID="\$(cat "\${PID_FILE}" 2>/dev/null || true)"
+    if [ -n "\${OLD_PID}" ] && kill -0 "\${OLD_PID}" 2>/dev/null; then
+        echo "[remote] ERROR: Autopilot is already running on \$(hostname) (PID=\${OLD_PID})." >&2
+        exit 1
+    fi
+fi
+if command -v tmux >/dev/null 2>&1; then
+    tmux kill-session -t 'minorsafe_autopilot' 2>/dev/null || true
+    tmux new-session -d -s 'minorsafe_autopilot' bash -lc $(printf '%q' "${AUTO_CMD}")
+    echo "[remote] Started detached tmux session 'minorsafe_autopilot'."
+else
+    setsid nohup bash -lc $(printf '%q' "${AUTO_CMD}") > '${REMOTE_DIR}/results/logs/autopilot_detached.log' 2>&1 < /dev/null &
+    DETACH_PID="\$!"
+    sleep 2
+    kill -0 "\${DETACH_PID}" 2>/dev/null || { echo "[remote] ERROR: Autopilot failed to stay running after launch." >&2; exit 1; }
+    echo "[remote] Started detached autopilot PID \${DETACH_PID} on \$(hostname)."
+fi
+EOF
+)"
+        run_ssh "${LAUNCH_SCRIPT}"
+        echo "[remote] Safe to close or disconnect your laptop now."
+        echo "[remote] Monitor anytime: bash scripts/remote.sh status"
+        echo "[remote] Stream logs:     bash scripts/remote.sh logs"
+        echo "[remote] Pull results:    bash scripts/remote.sh pull"
+        ;;
+
     *)
         echo "Unknown subcommand: ${SUBCMD}" >&2
-        echo "Valid subcommands: info check users setup-ssh-key sync setup preflight gpu-test test-all run status logs pull" >&2
+        echo "Valid subcommands: info check users setup-ssh-key sync setup preflight gpu-test test-all autopilot run status logs pull" >&2
         exit 1
         ;;
 esac

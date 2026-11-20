@@ -23,6 +23,7 @@ def test_shell_scripts_syntax_valid():
         REPO_ROOT / "scripts" / "run_phase.sh",
         REPO_ROOT / "scripts" / "run_msba.sh",
         REPO_ROOT / "scripts" / "run_all_tests.sh",
+        REPO_ROOT / "scripts" / "run_autopilot.sh",
         REPO_ROOT / "scripts" / "activate.sh",
         REPO_ROOT / "scripts" / "remote.sh",
         REPO_ROOT / "scripts" / "install_git_hooks.sh",
@@ -84,11 +85,23 @@ def test_remote_script_dry_run_subcommands(tmp_path: Path):
         ),
         (["setup"], ["rsync", "ssh", "setup_server.sh", "preflight"]),
         (["preflight"], ["ssh", "preflight", "gpu_80gb"]),
+        (["check-gates", "gpu_lab1"], ["rsync", "ssh", "download_models.py", "--check-gates", "gpu_lab1"]),
         (["run", "main", "gpu_80gb"], ["rsync", "ssh", "run_phase.sh", "main", "gpu_80gb"]),
         (["run", "main", "gpu_80gb", "--detach"], ["rsync", "ssh", "tmux", "minorsafe_main"]),
         (["status"], ["ssh", "minorsafe.cli status", "nvidia-smi", "latest.log"]),
         (["info"], ["ssh", "nvidia-smi", "df -h"]),
         (["test-all", "gpu_lab1"], ["rsync", "ssh", "run_all_tests.sh", "CUDA_VISIBLE_DEVICES=0"]),
+        (
+            ["autopilot", "gpu_lab1"],
+            [
+                "rsync",
+                "ssh",
+                "download_models.py",
+                "--check-gates",
+                "run_autopilot.sh",
+                "CUDA_VISIBLE_DEVICES=0",
+            ],
+        ),
         (["logs"], ["ssh", "tail", "latest.log"]),
         (["pull"], ["rsync", "--exclude=*.safetensors", "root@10.0.0.1:/root/profanity_research/results/"]),
     ]
@@ -186,3 +199,23 @@ def test_snapshot_versions_creates_snapshot_file(tmp_path: Path):
     body = snaps[0].read_text(encoding="utf-8")
     assert "python3:" in body
     assert "minorsafe==" in body
+
+
+def test_run_autopilot_dry_run():
+    script = REPO_ROOT / "scripts" / "run_autopilot.sh"
+    res = subprocess.run(
+        ["bash", str(script), "gpu_lab1", "--skip-quant"],
+        env={**os.environ, "DRY_RUN": "1"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, res.stderr + res.stdout
+    for expected in (
+        "scripts/run_all_tests.sh gpu_lab1",
+        "scripts/download_models.py --profile gpu_lab1 --check-gates",
+        "scripts/run_phase.sh data gpu_lab1",
+        "scripts/run_phase.sh pilot gpu_lab1",
+        "scripts/run_msba.sh gpu_lab1 --skip-quant",
+    ):
+        assert expected in res.stdout, f"Missing {expected!r} in:\n{res.stdout}"

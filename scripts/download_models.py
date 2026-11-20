@@ -40,6 +40,11 @@ def main() -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="Print required models without downloading")
     parser.add_argument("--verify", action="store_true", help="Verify tokenizer/config load for each model")
+    parser.add_argument(
+        "--check-gates",
+        action="store_true",
+        help="Verify HuggingFace read authorization for all gated models without downloading weights",
+    )
     parser.add_argument("--cache-dir", default=os.environ.get("HF_HOME"), help="Optional HF cache dir")
     args = parser.parse_args()
 
@@ -51,6 +56,35 @@ def main() -> int:
         print(f"  - {alias}: {hf_id}{gate_tag}")
 
     if args.dry_run:
+        return 0
+
+    if args.check_gates:
+        from huggingface_hub import HfApi
+
+        token = os.environ.get("HF_TOKEN") or None
+        api = HfApi(token=token)
+        gated_entries = [(a, h) for a, h, g in entries if g]
+        if not gated_entries:
+            print(f"Profile '{profile}' has no gated models.")
+            return 0
+        failures: list[tuple[str, str, str]] = []
+        for alias, hf_id in gated_entries:
+            try:
+                api.auth_check(repo_id=hf_id, token=token)
+                print(f"[PASS] Gate check: {alias} ({hf_id})")
+            except Exception as exc:
+                msg = f"{type(exc).__name__}: {exc}".splitlines()[0]
+                print(f"[FAIL] Gate check: {alias} ({hf_id}) -> {msg}", file=sys.stderr)
+                failures.append((alias, hf_id, msg))
+        if failures:
+            print(
+                "\nAction required: accept the license terms on HuggingFace and ensure HF_TOKEN is set for:",
+                file=sys.stderr,
+            )
+            for alias, hf_id, _ in failures:
+                print(f"  - {alias}: https://huggingface.co/{hf_id}", file=sys.stderr)
+            return 1
+        print(f"All {len(gated_entries)} gated model(s) authorized for profile '{profile}'.")
         return 0
 
     from huggingface_hub import snapshot_download
