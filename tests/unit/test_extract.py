@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
+
 from minorsafe.methods.steering.extract import (
     calibrate_hyperplane_from_activations,
     extract_steering_directions,

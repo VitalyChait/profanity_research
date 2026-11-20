@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+
 from minorsafe.analysis.aggregate import aggregate_experiment_results
 from minorsafe.analysis.plots import generate_all_figures
 from minorsafe.analysis.report import generate_executive_report

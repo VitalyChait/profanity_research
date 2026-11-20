@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+
 from minorsafe.eval.detection import compute_detection_metrics
 from minorsafe.eval.evaluate import compute_success_flag
 from minorsafe.eval.fluency import compute_fluency_metrics

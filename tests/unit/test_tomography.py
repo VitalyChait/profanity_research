@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+
 from minorsafe.methods.steering.tomography import run_latent_tomography
 
 pytestmark = pytest.mark.unit

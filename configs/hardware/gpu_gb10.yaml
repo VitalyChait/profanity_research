@@ -1,0 +1,40 @@
+name: gpu_gb10
+description: "Single NVIDIA GB10 (121 GiB unified memory) MSBA benchmark profile: all 4 model families x S/M/L tiers x H1-H10."
+device: cuda
+min_vram_gb: 70.0
+num_gpus: 1
+allowed_quants: ["bf16", "int8", "nf4", "awq", "fp8"]
+default_quant: bf16
+batch_size: 64
+max_new_tokens: 256
+# Focused 8-model representative grid (2 S + 4 M + 2 L across Qwen, DeepSeek, Gemma, Llama)
+# Preserves every H1-H10 comparison (incl. S/M/L scale H7 & H9 reasoning pairs) without redundant duplicates.
+generators:
+  - gemma3_270m
+  - qwen25_05b
+  - qwen25_15b
+  - deepseek_r1_15b
+  - gemma3_1b
+  - llama32_1b
+  - qwen25_7b
+  - llama31_8b
+decoder_guards:
+  - qwen3guard_06b
+  - llamaguard3_1b
+encoder_guards:
+  - toxic_bert
+  - modernbert_base
+encoder_mlms:
+  - modernbert_base_mlm
+teacher: llama33_70b_awq
+teacher_backend: vllm
+lora_large_mode: lora
+use_vllm: true
+vllm_gpu_memory_utilization: 0.88
+eval:
+  toxicity_backend: detoxify
+  bertscore_model: roberta-large
+  ppl_model: gpt2-large
+  judge_backend: vllm
+  judge_model: mistral_small_24b_awq
+  capability_items: 50

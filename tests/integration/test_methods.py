@@ -5,9 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from minorsafe.methods.base import RunContext, create_method
 
 from minorsafe.config import load_age_bands, load_hardware, load_method, load_models, load_prompts
+from minorsafe.methods.base import RunContext, create_method
 
 pytestmark = pytest.mark.integration
 

@@ -21,6 +21,8 @@ def test_shell_scripts_syntax_valid():
         REPO_ROOT / "scripts" / "env_sandbox.sh",
         REPO_ROOT / "scripts" / "snapshot_versions.sh",
         REPO_ROOT / "scripts" / "run_phase.sh",
+        REPO_ROOT / "scripts" / "run_msba.sh",
+        REPO_ROOT / "scripts" / "run_all_tests.sh",
         REPO_ROOT / "scripts" / "activate.sh",
         REPO_ROOT / "scripts" / "remote.sh",
         REPO_ROOT / "scripts" / "install_git_hooks.sh",
@@ -85,6 +87,8 @@ def test_remote_script_dry_run_subcommands(tmp_path: Path):
         (["run", "main", "gpu_80gb"], ["rsync", "ssh", "run_phase.sh", "main", "gpu_80gb"]),
         (["run", "main", "gpu_80gb", "--detach"], ["rsync", "ssh", "tmux", "minorsafe_main"]),
         (["status"], ["ssh", "minorsafe.cli status", "nvidia-smi", "latest.log"]),
+        (["info"], ["ssh", "nvidia-smi", "df -h"]),
+        (["test-all", "gpu_lab1"], ["rsync", "ssh", "run_all_tests.sh", "CUDA_VISIBLE_DEVICES=0"]),
         (["logs"], ["ssh", "tail", "latest.log"]),
         (["pull"], ["rsync", "--exclude=*.safetensors", "root@10.0.0.1:/root/profanity_research/results/"]),
     ]

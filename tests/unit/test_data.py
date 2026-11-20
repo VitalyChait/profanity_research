@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
 from minorsafe.data.lexicons import (
     find_complex_spans,
     find_profanity_spans,
@@ -18,8 +19,6 @@ from minorsafe.data.obfuscation import (
     detect_obfuscated_profanity,
     generate_obfuscated_examples,
 )
-from minorsafe.data.splits import assign_splits, check_split_leakage
-
 from minorsafe.data.schema import (
     Example,
     Turn,
@@ -28,6 +27,7 @@ from minorsafe.data.schema import (
     save_examples,
     save_pairs,
 )
+from minorsafe.data.splits import assign_splits, check_split_leakage
 
 pytestmark = pytest.mark.unit
 

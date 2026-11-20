@@ -8,7 +8,7 @@ from minorsafe.config import EvalSettings, ModelSpec, load_models
 from minorsafe.eval.fluency import compute_fluency_metrics_batch
 from minorsafe.eval.judge import LLMJudge, heuristic_judge_score
 from minorsafe.eval.readability import compute_readability_metrics
-from minorsafe.eval.safety import compute_safety_metrics
+from minorsafe.eval.safety import compute_safety_metrics_batch
 from minorsafe.eval.semantic import compute_recomposition_metrics_batch
 from minorsafe.registry import default_device
 
@@ -94,14 +94,12 @@ def evaluate_responses_df(
         baselines_m0.append(str(b_txt) if b_txt is not None else None)
         baseline_ppls.append(float(b_ppl) if b_ppl is not None else None)
 
-    saf_rows = [
-        compute_safety_metrics(
-            t,
-            label_unsafe=bool(r.get("label_unsafe", False)),
-            backend=eval_settings.toxicity_backend,
-        )
-        for t, r in zip(texts, records, strict=True)
-    ]
+    saf_rows = compute_safety_metrics_batch(
+        texts,
+        [bool(r.get("label_unsafe", False)) for r in records],
+        backend=eval_settings.toxicity_backend,
+        device=dev,
+    )
     read_rows = [compute_readability_metrics(t, target_fk_grade=target_fk_grade) for t in texts]
     sem_rows = compute_recomposition_metrics_batch(
         sources=prompts,

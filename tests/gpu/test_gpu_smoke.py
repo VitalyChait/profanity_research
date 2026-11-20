@@ -124,3 +124,32 @@ def test_gpu_encoder_guard_zeroshot(tmp_path: Path):
         assert scores[0] > scores[1]
     finally:
         guard.close()
+
+
+def test_gpu_vllm_qwen25_05b_smoke():
+    """Verify vLLM + CUDA driver stack initializes and generates cleanly on pinned GPU 0."""
+    vllm = pytest.importorskip("vllm")
+    import gc
+
+    from vllm.distributed.parallel_state import destroy_model_parallel
+
+    spec = load_models()["qwen25_05b"]
+    llm = vllm.LLM(
+        model=spec.hf_id,
+        dtype="auto",
+        max_model_len=512,
+        gpu_memory_utilization=0.35,
+        trust_remote_code=False,
+    )
+    try:
+        outs = llm.generate(
+            ["Say hello to a teenager in one polite sentence."],
+            vllm.SamplingParams(max_tokens=16, temperature=0.0, seed=0),
+        )
+        assert len(outs) == 1
+        assert outs[0].outputs[0].text.strip()
+    finally:
+        destroy_model_parallel()
+        del llm
+        gc.collect()
+        torch.cuda.empty_cache()

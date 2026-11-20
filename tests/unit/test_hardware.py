@@ -21,6 +21,7 @@ from minorsafe.hardware import (
     parse_who_users,
     resolve_profile_name,
     run_preflight_checks,
+    visible_gpu_indices,
 )
 from minorsafe.telemetry.logger import SmartRunLogger
 from minorsafe.utils import write_json
@@ -293,3 +294,51 @@ def test_smart_run_logger_records_failure_and_traceback(tmp_path: Path):
     last_err = tmp_path / "last_error.txt"
     assert last_err.exists()
     assert "RuntimeError: boom" in last_err.read_text(encoding="utf-8")
+
+
+def test_shared_host_gpu_pinning_and_desktop_process_filter(tmp_path: Path):
+    from minorsafe.config import load_hardware
+
+    lab1 = load_hardware("gpu_lab1")
+    assert lab1.cuda_visible_devices == "0"
+    assert lab1.shared_host is True
+    assert lab1.teacher == "mistral_small_24b_awq"
+    assert visible_gpu_indices("0") == {0}
+
+    # Desktop compositor daemons on GPU 0 are ignored; foreign GPU 1 load is ignored when gpu_indices={0}.
+    apps = parse_nvidia_compute_apps(
+        "242603, /usr/libexec/gnome-remote-desktop-daemon, 430\n242493, /usr/lib/xorg/Xorg, 240\n"
+    )
+    assert apps == []
+
+    dual_gpu_out = (
+        "0, NVIDIA RTX 6000 Ada Generation, 49140, 676, 0, 32\n"
+        "1, NVIDIA RTX 6000 Ada Generation, 49140, 40000, 99, 78\n"
+    )
+    rep = check_server_exclusivity(
+        current_user="vitaly",
+        max_idle_mem_mb=1024,
+        lock_path=tmp_path / ".minorsafe.lock",
+        gpu_indices={0},
+        shared_host=True,
+        _nvidia_gpu_out=dual_gpu_out,
+        _nvidia_apps_out="",
+        _who_out="shubhranshu pts/1 2026-11-20 14:03\n",
+    )
+    assert rep.exclusive is True
+
+    # Real busy load on our own pinned GPU 0 must still fail exclusivity even on shared_host.
+    busy_gpu0 = (
+        "0, NVIDIA RTX 6000 Ada Generation, 49140, 22000, 95, 70\n"
+        "1, NVIDIA RTX 6000 Ada Generation, 49140, 18, 0, 32\n"
+    )
+    rep_busy0 = check_server_exclusivity(
+        current_user="vitaly",
+        max_idle_mem_mb=1024,
+        lock_path=tmp_path / ".minorsafe.lock",
+        gpu_indices={0},
+        shared_host=True,
+        _nvidia_gpu_out=busy_gpu0,
+        _nvidia_apps_out="",
+    )
+    assert rep_busy0.exclusive is False

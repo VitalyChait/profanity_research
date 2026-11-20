@@ -7,6 +7,7 @@ import gc
 import json
 import math
 import os
+import random
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,12 +30,41 @@ from minorsafe.data.schema import Example, load_examples, load_pairs
 from minorsafe.eval.capability import evaluate_capability_retention
 from minorsafe.eval.evaluate import evaluate_responses_df
 from minorsafe.eval.judge import export_human_annotation_sheet
-from minorsafe.hardware import acquire_run_lock, check_server_exclusivity
+from minorsafe.hardware import acquire_run_lock, check_server_exclusivity, visible_gpu_indices
 from minorsafe.methods.base import MethodOutput, RunContext, create_method
 from minorsafe.runner.grid import RunSpec, expand_experiment_grid, verify_split_guardrail
 from minorsafe.runner.store import RunStore
 from minorsafe.telemetry import GPUSampler, SmartRunLogger
 from minorsafe.utils import DATA_DIR, RESULTS_DIR, git_sha, package_versions, read_json, write_json
+
+
+def _stratified_subsample(examples: list[Example], max_examples: int, seed: int = 13) -> list[Example]:
+    """Deterministically round-robin across primary categories so rare subsets stay covered."""
+    if max_examples <= 0 or max_examples >= len(examples):
+        return examples
+    rng = random.Random(seed)
+    buckets: dict[str, list[Example]] = {}
+    for ex in examples:
+        cat = ex.categories[0] if ex.categories else "benign"
+        buckets.setdefault(cat, []).append(ex)
+    for items in buckets.values():
+        rng.shuffle(items)
+
+    chosen: list[Example] = []
+    keys = sorted(buckets.keys())
+    idx = 0
+    while len(chosen) < max_examples:
+        added_any = False
+        for k in keys:
+            if idx < len(buckets[k]):
+                chosen.append(buckets[k][idx])
+                added_any = True
+                if len(chosen) >= max_examples:
+                    break
+        if not added_any:
+            break
+        idx += 1
+    return chosen
 
 
 def _output_to_row(
@@ -106,7 +136,11 @@ def run_experiment(
         profile.device == "cuda" and require_exclusive and os.environ.get("MINORSAFE_ALLOW_BUSY", "0") != "1"
     )
     if enforce_exclusive:
-        excl = check_server_exclusivity()
+        excl = check_server_exclusivity(
+            max_idle_mem_mb=1024 if profile.shared_host else 500,
+            gpu_indices=visible_gpu_indices(profile.cuda_visible_devices),
+            shared_host=profile.shared_host,
+        )
         if not excl.exclusive:
             raise RuntimeError(f"Server/GPU is not exclusive: {'; '.join(excl.reasons)}")
 
@@ -126,7 +160,7 @@ def run_experiment(
         cat_set = set(exp.categories)
         split_examples = [e for e in split_examples if any(c in cat_set for c in e.categories)]
     if exp.max_examples:
-        split_examples = split_examples[: exp.max_examples]
+        split_examples = _stratified_subsample(split_examples, exp.max_examples)
 
     calib_ex = [e for e in all_examples if e.split == "calib"]
     dev_ex = [e for e in all_examples if e.split == "dev"]

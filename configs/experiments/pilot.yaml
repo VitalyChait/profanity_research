@@ -1,0 +1,63 @@
+name: pilot
+description: "Fast assumption-testing GPU pilot (~25-35 min on GB10) across M0/M1/M2/M3 on S/M + reasoning tiers."
+split: dev
+seeds: [0]
+max_examples: 45
+age_bands: ["teen_12_18"]
+temperature: 0.0
+warmup_queries: 2
+evaluate: true
+capability_eval: true
+runs:
+  - method: m0a_raw
+    generators: ["qwen25_05b", "qwen25_15b", "deepseek_r1_15b"]
+  - method: m0b_sysprompt
+    generators: ["qwen25_05b", "qwen25_15b", "deepseek_r1_15b"]
+  - method: m1_encoder_guard
+    generators: ["qwen25_05b", "qwen25_15b", "deepseek_r1_15b"]
+    params:
+      train_mode: zeroshot
+      action: fallback
+    label: m1_enc_zeroshot
+  - method: m1_encoder_guard
+    generators: ["qwen25_05b", "qwen25_15b", "deepseek_r1_15b"]
+    params:
+      train_mode: finetuned
+      action: mlm_substitute
+    label: m1_enc_mlm_sub
+  - method: m1_encoder_guard
+    generators: ["qwen25_05b", "qwen25_15b", "deepseek_r1_15b"]
+    params:
+      train_mode: finetuned
+      action: llm_rewrite
+    label: m1_enc_llm_rewrite
+  - method: m1_decoder_guard
+    generators: ["qwen25_05b", "qwen25_15b", "deepseek_r1_15b"]
+    params:
+      action: fallback
+    label: m1_dec_fallback
+  - method: m2_lora
+    generators: ["qwen25_05b", "qwen25_15b", "deepseek_r1_15b"]
+    params:
+      n_calib: 40
+      epochs: 1
+  - method: m3_steer_swfc
+    generators: ["qwen25_05b", "qwen25_15b", "deepseek_r1_15b"]
+    params:
+      n_calib: 40
+  - method: m3_steer_sttp
+    generators: ["qwen25_05b", "qwen25_15b", "deepseek_r1_15b"]
+    params:
+      n_calib: 40
+  - method: m3_steer_stmp
+    generators: ["qwen25_05b", "qwen25_15b", "deepseek_r1_15b"]
+    params:
+      n_calib: 40
+  - method: m3_steer_ortho
+    generators: ["qwen25_05b", "qwen25_15b", "deepseek_r1_15b"]
+    params:
+      n_calib: 40
+  - method: m3_probe_guard
+    generators: ["qwen25_05b", "qwen25_15b", "deepseek_r1_15b"]
+    params:
+      n_calib: 40

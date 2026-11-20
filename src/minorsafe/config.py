@@ -78,6 +78,9 @@ class HardwareProfile(StrictModel):
     lora_large_mode: Literal["lora", "qlora"] = "lora"
     use_vllm: bool = True
     vllm_gpu_memory_utilization: float = 0.85
+    # Optional GPU pinning & shared-host policy (e.g. "0" on a shared 2-GPU server to leave GPU 1 free).
+    cuda_visible_devices: str | None = None
+    shared_host: bool = False
     # Permit CPU placeholder components (heuristic guards/judge/PPL, fake LoRA, ...). Debug profiles only.
     allow_placeholders: bool = False
     eval: EvalSettings = EvalSettings()

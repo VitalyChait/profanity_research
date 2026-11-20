@@ -5,10 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from minorsafe.runner.grid import expand_experiment_grid, verify_split_guardrail
-from minorsafe.runner.store import RunStore
 
 from minorsafe.config import load_experiment, load_hardware, load_models
+from minorsafe.runner.grid import expand_experiment_grid, verify_split_guardrail
+from minorsafe.runner.store import RunStore
 
 pytestmark = pytest.mark.unit
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
 from minorsafe.runner.run import run_smoke_pipeline
 
 pytestmark = [pytest.mark.smoke, pytest.mark.integration]

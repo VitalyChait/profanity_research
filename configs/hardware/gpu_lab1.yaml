@@ -1,0 +1,43 @@
+name: gpu_lab1
+description: "Brandeis lab1 (2x RTX 6000 Ada 48GB): hard-pinned to GPU 0 so GPU 1 remains free for lab users."
+device: cuda
+min_vram_gb: 44.0
+num_gpus: 1
+cuda_visible_devices: "0"
+shared_host: true
+allowed_quants: ["bf16", "int8", "nf4", "awq", "fp8"]
+default_quant: bf16
+batch_size: 64
+max_new_tokens: 256
+# Focused 8-model representative grid (2 S + 4 M + 2 L across Qwen, DeepSeek, Gemma, Llama).
+# Fits cleanly in 48 GB VRAM on GPU 0 and leaves ~85+ GB headroom on lab1's 177 GB disk.
+generators:
+  - gemma3_270m
+  - qwen25_05b
+  - qwen25_15b
+  - deepseek_r1_15b
+  - gemma3_1b
+  - llama32_1b
+  - qwen25_7b
+  - llama31_8b
+decoder_guards:
+  - qwen3guard_06b
+  - llamaguard3_1b
+encoder_guards:
+  - toxic_bert
+  - modernbert_base
+encoder_mlms:
+  - modernbert_base_mlm
+# Reuse 24B AWQ (~14 GB) for both teacher and judge so 48 GB VRAM + 177 GB disk never overflow.
+teacher: mistral_small_24b_awq
+teacher_backend: vllm
+lora_large_mode: lora
+use_vllm: true
+vllm_gpu_memory_utilization: 0.82
+eval:
+  toxicity_backend: detoxify
+  bertscore_model: roberta-large
+  ppl_model: gpt2-large
+  judge_backend: vllm
+  judge_model: mistral_small_24b_awq
+  capability_items: 50

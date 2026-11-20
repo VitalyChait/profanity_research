@@ -162,8 +162,10 @@ class SteeringResponseMethod(ResponseMethod):
         self.hook.attach(layers[target_layer])
         return rep
 
-    def _generate_with_prefill_probe(self, messages: list[dict], seed: int):
-        """Run generation while capturing the prompt-end residual vector during prefill (0 extra tokens)."""
+    def _generate_batch_with_prefill_probe(
+        self, batch_msgs: list[list[dict]], seed: int
+    ) -> tuple[list, list[float]]:
+        """Run batched generation while capturing prompt-end residual vectors during prefill (0 extra tokens)."""
         assert self.generator is not None and self.probe is not None and self.model is not None
         layers = get_decoder_layers(self.model, layers_path=self.ctx.generator_spec.layers_path)
         captured: list = []
@@ -171,37 +173,48 @@ class SteeringResponseMethod(ResponseMethod):
         def _prefill_hook(module, inp, out):
             if not captured:
                 h = out[0] if isinstance(out, tuple) else out
-                captured.append(h[0, -1, :].detach().cpu().float().numpy())
+                captured.append(h[:, -1, :].detach().cpu().float().numpy())
 
         handle = layers[self.probe.layer_idx].register_forward_hook(_prefill_hook)
         try:
-            gr = self.generator.generate([messages], seed=seed)[0]
+            gen_results = self.generator.generate(batch_msgs, seed=seed)
         finally:
             handle.remove()
 
-        score = self.probe.score_activation(captured[0])
-        return gr, score
+        acts = captured[0]
+        scores = [float(self.probe.score_activation(acts[i])) for i in range(len(batch_msgs))]
+        return gen_results, scores
 
     def _respond_probe_guard(self, batch: list[Example], age_band: str, seed: int) -> list[MethodOutput]:
-        """Probe-gated moderation: the action runs only when the probe flags the prompt/response."""
+        """Probe-gated moderation: batched generation followed by action only when flagged."""
         assert self.generator is not None and self.ctx is not None and self.probe is not None
+        if not batch:
+            return []
+
         probe = self.probe
+        batch_msgs = [ex.messages() for ex in batch]
+        if probe.is_prompt_level:
+            # Zero-extra-token prefill evaluation (plan §5.4.3)
+            gen_results, prefill_scores = self._generate_batch_with_prefill_probe(batch_msgs, seed=seed)
+        else:
+            gen_results = self.generator.generate(batch_msgs, seed=seed)
+            prefill_scores = []
+
         outputs: list[MethodOutput] = []
-        for ex in batch:
-            t0 = time.perf_counter()
-            tok = TokenUsage()
+        for idx, (ex, gr) in enumerate(zip(batch, gen_results, strict=True)):
+            tok = TokenUsage(
+                generator_in=gr.n_in,
+                generator_out=gr.n_out,
+                generator_reasoning_out=gr.n_reasoning,
+            )
+            gen_ms_each = max(0.01, gr.e2e_s * 1000.0 / max(1, len(batch)))
+            t_post0 = time.perf_counter()
 
             if probe.is_prompt_level:
-                # Zero-extra-token prefill evaluation (plan §5.4.3)
-                gr, score = self._generate_with_prefill_probe(ex.messages(), seed=seed)
+                score = prefill_scores[idx]
             else:
-                gr = self.generator.generate([ex.messages()], seed=seed)[0]
                 score, n_probe_tok = probe.score_text(self.model, self.tokenizer, ex.last_user, gr.text)
                 tok.guard_in += n_probe_tok
-
-            tok.generator_in += gr.n_in
-            tok.generator_out += gr.n_out
-            tok.generator_reasoning_out += gr.n_reasoning
 
             final_text, action_taken = gr.text, "none"
             if score >= probe.threshold:
@@ -227,7 +240,8 @@ class SteeringResponseMethod(ResponseMethod):
                 tok = tok + extra_tok
 
             final_text, n_filtered = self.apply_post_filter(final_text)
-            e2e_ms = max(0.01, (time.perf_counter() - t0) * 1000.0)
+            post_ms = (time.perf_counter() - t_post0) * 1000.0
+            e2e_ms = max(0.01, gen_ms_each + post_ms)
             eff_tok_s = max(1, gr.n_out) / (e2e_ms / 1000.0)
             extra = {"probe_score": score, "probe_flagged": bool(score >= probe.threshold)}
             if self.post_filter:

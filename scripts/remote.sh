@@ -213,7 +213,15 @@ pull_remote_logs() {
 
 # Build safe remote env exports (without printing secrets in DRY_RUN)
 remote_env_prefix() {
+    local prof="${1:-${REMOTE_PROFILE:-auto}}"
     local parts="export PYTHONNOUSERSITE=1 UV_NO_MODIFY_PATH=1 TOKENIZERS_PARALLELISM=false"
+    local vis_gpus="${CUDA_VISIBLE_DEVICES:-${REMOTE_CUDA_VISIBLE_DEVICES:-}}"
+    if [[ -z "${vis_gpus}" ]] && [[ -f "${REPO_ROOT}/configs/hardware/${prof}.yaml" ]]; then
+        vis_gpus="$(sed -n 's/^cuda_visible_devices:[[:space:]]*["'\'']*\([^"'\''# ]*\).*/\1/p' "${REPO_ROOT}/configs/hardware/${prof}.yaml" | head -n 1)"
+    fi
+    if [[ -n "${vis_gpus}" ]]; then
+        parts+=" CUDA_VISIBLE_DEVICES=$(printf '%q' "${vis_gpus}")"
+    fi
     if [[ -n "${HF_HOME:-}" ]]; then
         parts+=" HF_HOME=$(printf '%q' "${HF_HOME}")"
     fi
@@ -231,6 +239,30 @@ remote_env_prefix() {
 }
 
 case "${SUBCMD}" in
+    info)
+        # Inspect full disk mounts, RAM, CPU cores, OS, CUDA/uv/tmux, and HF cache on remote host.
+        REMOTE_INFO_SCRIPT="$(cat <<EOF
+echo "=== Host ==="
+hostname && uname -a && (cat /etc/os-release | grep PRETTY_NAME || true)
+echo "=== CPU & RAM ==="
+nproc && free -h
+echo "=== Disks (df -h) ==="
+df -h -x tmpfs -x devtmpfs -x squashfs 2>/dev/null || df -h
+echo "=== Large extra dirs (/mnt /data /scratch /opt /home) ==="
+ls -ld /mnt /data /scratch /local /home/* 2>/dev/null || true
+echo "=== GPUs ==="
+nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu,driver_version --format=csv,noheader 2>/dev/null || true
+echo "=== Toolchain ==="
+which python3 uv tmux git nvcc nvidia-smi 2>/dev/null || true
+(nvcc --version 2>/dev/null | tail -n 2) || true
+echo "=== Repo & HF Cache ==="
+ls -ld '${REMOTE_DIR}' '${HF_HOME}' 2>/dev/null || true
+du -sh '${REMOTE_DIR}' '${HF_HOME}' 2>/dev/null || true
+EOF
+)"
+        run_ssh "${REMOTE_INFO_SCRIPT}"
+        ;;
+
     check|users|who)
         # Validate VPN connectivity, active users (`w` + `ps`), GPU utilization/processes, and disk space.
         REMOTE_CHECK_SCRIPT="$(cat <<EOF
@@ -329,10 +361,11 @@ EOF
         ;;
 
     setup)
+        PROF="${1:-${REMOTE_PROFILE}}"
         run_rsync_push
-        ENV_PRE="$(remote_env_prefix)"
+        ENV_PRE="$(remote_env_prefix "${PROF}")"
         set +e
-        run_ssh "${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/setup_server.sh && .venv/bin/python -m minorsafe.cli preflight --hardware '${REMOTE_PROFILE}'$( [[ "${REQUIRE_EXCLUSIVE}" == "0" ]] && echo ' --allow-busy' || true )"
+        run_ssh "${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/setup_server.sh && .venv/bin/python -m minorsafe.cli preflight --hardware '${PROF}'$( [[ "${REQUIRE_EXCLUSIVE}" == "0" ]] && echo ' --allow-busy' || true )"
         RC=$?
         set -e
         if [[ "${RC}" -ne 0 ]]; then
@@ -344,7 +377,7 @@ EOF
 
     preflight)
         PROF="${1:-${REMOTE_PROFILE}}"
-        ENV_PRE="$(remote_env_prefix)"
+        ENV_PRE="$(remote_env_prefix "${PROF}")"
         ALLOW_FLAG=""
         if [[ "${REQUIRE_EXCLUSIVE}" == "0" ]]; then
             ALLOW_FLAG=" --allow-busy"
@@ -369,8 +402,12 @@ EOF
             shift
         done
         run_rsync_push
-        ENV_PRE="$(remote_env_prefix)"
-        RUN_CMD="${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/run_phase.sh '${PHASE}' '${RUN_PROFILE}'"
+        ENV_PRE="$(remote_env_prefix "${RUN_PROFILE}")"
+        if [[ "${PHASE}" == "msba" ]]; then
+            RUN_CMD="${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/run_msba.sh '${RUN_PROFILE}'"
+        else
+            RUN_CMD="${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/run_phase.sh '${PHASE}' '${RUN_PROFILE}'"
+        fi
         if [[ "${DETACH_MODE}" == "1" ]]; then
             SESSION="minorsafe_${PHASE}"
             DETACH_SCRIPT="$(cat <<EOF
@@ -400,7 +437,7 @@ EOF
         ;;
 
     status)
-        run_ssh "cd '${REMOTE_DIR}' && ( .venv/bin/python -m minorsafe.cli status || true ) && echo '--- tmux ---' && ( tmux ls 2>/dev/null || echo 'no tmux sessions' ) && echo '--- GPUs ---' && ( nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader 2>/dev/null || echo 'no nvidia-smi' ) && echo '--- latest log ---' && ( [ -f results/logs/latest.log ] && tail -n 15 results/logs/latest.log || echo 'no logs yet' )"
+        run_ssh "cd '${REMOTE_DIR}' && ( .venv/bin/python -m minorsafe.cli status || true ) && echo '--- tmux ---' && ( tmux ls 2>/dev/null || echo 'no tmux sessions' ) && echo '--- background procs ---' && ( pgrep -af 'minorsafe\\.cli|run_msba\\.sh|run_all_tests\\.sh' || echo 'no detached minorsafe procs' ) && echo '--- GPUs ---' && ( nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader 2>/dev/null || echo 'no nvidia-smi' ) && echo '--- latest log ---' && ( [ -f results/logs/latest.log ] && tail -n 15 results/logs/latest.log || echo 'no logs yet' )"
         ;;
 
     logs)
@@ -427,14 +464,26 @@ EOF
         ;;
 
     gpu-test)
+        PROF="${1:-${REMOTE_PROFILE}}"
         run_rsync_push
-        ENV_PRE="$(remote_env_prefix)"
+        ENV_PRE="$(remote_env_prefix "${PROF}")"
         run_ssh "${ENV_PRE} cd '${REMOTE_DIR}' && .venv/bin/python -m pytest -v -p no:cacheprovider -m gpu tests/gpu/"
+        ;;
+
+    test-all)
+        PROF="${1:-${REMOTE_PROFILE}}"
+        if [[ $# -ge 1 ]]; then
+            shift
+        fi
+        EXTRA_FLAGS="$*"
+        run_rsync_push
+        ENV_PRE="$(remote_env_prefix "${PROF}")"
+        run_ssh "${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/run_all_tests.sh '${PROF}' ${EXTRA_FLAGS}"
         ;;
 
     *)
         echo "Unknown subcommand: ${SUBCMD}" >&2
-        echo "Valid subcommands: check users setup-ssh-key sync setup preflight gpu-test run status logs pull" >&2
+        echo "Valid subcommands: info check users setup-ssh-key sync setup preflight gpu-test test-all run status logs pull" >&2
         exit 1
         ;;
 esac

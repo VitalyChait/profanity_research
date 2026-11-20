@@ -2,13 +2,17 @@
 set -euo pipefail
 
 # Execute one MinorSafe pipeline phase, logging to results/logs/<phase>_<timestamp>.log.
-# Usage: bash scripts/run_phase.sh <phase> [profile]
-#   phases: smoke data rampup guards main recomposition subculture quant multiturn analyze
+# Usage: bash scripts/run_phase.sh <phase> [profile] [extra cli args...]
+#   phases: smoke pilot data tomography rampup guards main recomposition subculture quant multiturn analyze
 #   (aliases: main_grid ramp_up subculture_audit quant_grid)
 #   profile: hardware profile name in configs/hardware/ or "auto" (default)
 # Set DRY_RUN=1 to print the command without executing it.
 PHASE="${1:-smoke}"
 PROFILE="${2:-${PROFILE:-auto}}"
+EXTRA_ARGS=()
+if [[ $# -ge 3 ]]; then
+    EXTRA_ARGS=("${@:3}")
+fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
@@ -25,11 +29,15 @@ run_experiment() {
     if [[ "${split}" == "test" ]]; then
         args+=(--final)
     fi
+    if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+        args+=("${EXTRA_ARGS[@]}")
+    fi
     CMD=("${CLI[@]}" "${args[@]}")
 }
 
 case "${PHASE}" in
     smoke)                    CMD=("${CLI[@]}" smoke --hardware cpu_debug) ;;
+    pilot)                    run_experiment pilot ;;
     data)                     CMD=("${CLI[@]}" data build --hardware "${PROFILE}") ;;
     tomography)               CMD=("${CLI[@]}" tomography --hardware "${PROFILE}") ;;
     rampup|ramp_up)           run_experiment ramp_up ;;
@@ -42,7 +50,7 @@ case "${PHASE}" in
     analyze)                  CMD=("${CLI[@]}" analyze) ;;
     *)
         echo "Unknown phase: ${PHASE}" >&2
-        echo "Valid phases: smoke data rampup guards main recomposition subculture quant multiturn analyze" >&2
+        echo "Valid phases: smoke pilot data tomography rampup guards main recomposition subculture quant multiturn analyze" >&2
         exit 1
         ;;
 esac
@@ -56,6 +64,15 @@ fi
 # Sandbox Python/uv/HF/Triton/cache paths inside REPO_ROOT after DRY_RUN check.
 # shellcheck disable=SC1091
 source "${REPO_ROOT}/scripts/env_sandbox.sh"
+
+# Respect hardware profile GPU pinning (e.g. cuda_visible_devices: "0" on multi-GPU lab hosts).
+PROF_YAML="${REPO_ROOT}/configs/hardware/${PROFILE}.yaml"
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]] && [[ -f "${PROF_YAML}" ]]; then
+    PINNED_GPUS="$(sed -n 's/^cuda_visible_devices:[[:space:]]*["'\'']*\([^"'\''# ]*\).*/\1/p' "${PROF_YAML}" | head -n 1)"
+    if [[ -n "${PINNED_GPUS}" ]]; then
+        export CUDA_VISIBLE_DEVICES="${PINNED_GPUS}"
+    fi
+fi
 
 LOG_DIR="${REPO_ROOT}/results/logs"
 mkdir -p "${LOG_DIR}"

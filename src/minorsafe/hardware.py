@@ -209,25 +209,83 @@ def gpu_is_exclusive(device_index: int = 0) -> bool:
         return True
 
 
-def parse_nvidia_compute_apps(output: str, ignore_pids: set[int] | None = None) -> list[dict[str, Any]]:
-    """Parse ``nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits``."""
+_DESKTOP_GPU_PROCS = {
+    "xorg",
+    "xwayland",
+    "gnome-shell",
+    "gnome-remote-desktop-daemon",
+    "kwin_wayland",
+    "kwin_x11",
+    "plasmashell",
+}
+
+
+def visible_gpu_indices(cuda_visible: str | None = None) -> set[int] | None:
+    """Return integer physical GPU indices from ``CUDA_VISIBLE_DEVICES`` (or None if unset/unrestricted)."""
+    raw = cuda_visible if cuda_visible is not None else os.environ.get("CUDA_VISIBLE_DEVICES")
+    if not raw or not str(raw).strip():
+        return None
+    parts = [p.strip() for p in str(raw).split(",") if p.strip()]
+    if not parts or any(not p.isdigit() for p in parts):
+        return None
+    return {int(p) for p in parts}
+
+
+def _gpu_uuid_map() -> dict[str, int]:
+    """Map NVIDIA GPU UUID strings to physical integer GPU indices."""
+    if shutil.which("nvidia-smi") is None:
+        return {}
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=index,gpu_uuid", "--format=csv,noheader,nounits"],
+            text=True,
+            timeout=10,
+        )
+    except Exception:  # pragma: no cover
+        return {}
+    mapping: dict[str, int] = {}
+    for line in out.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 2 and parts[0].isdigit():
+            mapping[parts[1]] = int(parts[0])
+    return mapping
+
+
+def parse_nvidia_compute_apps(
+    output: str,
+    ignore_pids: set[int] | None = None,
+    ignore_desktop: bool = True,
+    allowed_uuids: set[str] | None = None,
+    has_uuid_col: bool = False,
+) -> list[dict[str, Any]]:
+    """Parse ``nvidia-smi --query-compute-apps`` CSV rows, skipping our PID and desktop compositors."""
     ignored = {os.getpid()} if ignore_pids is None else set(ignore_pids)
     apps: list[dict[str, Any]] = []
     for line in output.strip().splitlines():
         parts = [p.strip() for p in line.split(",")]
-        if len(parts) < 3:
-            continue
+        if has_uuid_col:
+            if len(parts) < 4:
+                continue
+            gpu_uuid, pid_raw, proc_name, mem_raw = parts[0], parts[1], parts[2], parts[3]
+            if allowed_uuids is not None and gpu_uuid not in allowed_uuids:
+                continue
+        else:
+            if len(parts) < 3:
+                continue
+            pid_raw, proc_name, mem_raw = parts[0], parts[1], parts[2]
         try:
-            pid = int(float(parts[0]))
+            pid = int(float(pid_raw))
         except ValueError:
             continue
         if pid in ignored:
             continue
+        if ignore_desktop and Path(proc_name).name.lower() in _DESKTOP_GPU_PROCS:
+            continue
         apps.append(
             {
                 "pid": pid,
-                "process_name": parts[1],
-                "used_memory_mb": _safe_int(parts[2], 0),
+                "process_name": proc_name,
+                "used_memory_mb": _safe_int(mem_raw, 0),
             }
         )
     return apps
@@ -301,27 +359,37 @@ def check_server_exclusivity(
     max_idle_util_pct: int = 10,
     allow_other_sessions_same_user: bool = True,
     lock_path: Path | None = None,
+    gpu_indices: set[int] | None = None,
+    shared_host: bool = False,
     _nvidia_gpu_out: str | None = None,
     _nvidia_apps_out: str | None = None,
     _who_out: str | None = None,
 ) -> ExclusivityReport:
-    """Validate that no other users, foreign GPU compute jobs, or active run locks occupy the server."""
+    """Validate that target GPU(s), host users (unless shared_host), and run locks are clear."""
     me = _resolve_current_user(current_user)
+    target_indices = gpu_indices if gpu_indices is not None else visible_gpu_indices()
 
     if _nvidia_apps_out is not None:
         gpu_processes = parse_nvidia_compute_apps(_nvidia_apps_out)
     elif shutil.which("nvidia-smi") is not None:
         try:
+            allowed_uuids: set[str] | None = None
+            if target_indices is not None:
+                umap = _gpu_uuid_map()
+                if umap:
+                    allowed_uuids = {u for u, idx in umap.items() if idx in target_indices}
             apps_out = subprocess.check_output(
                 [
                     "nvidia-smi",
-                    "--query-compute-apps=pid,process_name,used_memory",
+                    "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
                     "--format=csv,noheader,nounits",
                 ],
                 text=True,
                 timeout=20,
             )
-            gpu_processes = parse_nvidia_compute_apps(apps_out)
+            gpu_processes = parse_nvidia_compute_apps(
+                apps_out, allowed_uuids=allowed_uuids, has_uuid_col=True
+            )
         except Exception as exc:  # pragma: no cover
             log.warning("nvidia-smi compute-apps query failed: %s", exc)
             gpu_processes = []
@@ -331,23 +399,29 @@ def check_server_exclusivity(
     gpu_statuses = (
         parse_nvidia_smi_status(_nvidia_gpu_out) if _nvidia_gpu_out is not None else detect_gpu_status()
     )
+    if target_indices is not None:
+        gpu_statuses = [g for g in gpu_statuses if g.index in target_indices]
     gpu_busy_devices = [
         asdict(g)
         for g in gpu_statuses
         if g.memory_used_mb > max_idle_mem_mb or g.utilization_pct > max_idle_util_pct
     ]
 
-    if _who_out is not None:
-        who_text = _who_out
-    elif shutil.which("who") is not None:
-        try:
-            who_text = subprocess.check_output(["who"], text=True, timeout=10)
-        except Exception:  # pragma: no cover
-            who_text = ""
-    else:
+    if shared_host:
         who_text = ""
+        other_users: list[str] = []
+    else:
+        if _who_out is not None:
+            who_text = _who_out
+        elif shutil.which("who") is not None:
+            try:
+                who_text = subprocess.check_output(["who"], text=True, timeout=10)
+            except Exception:  # pragma: no cover
+                who_text = ""
+        else:
+            who_text = ""
 
-    other_users = parse_who_users(who_text, current_user=me)
+        other_users = parse_who_users(who_text, current_user=me)
     if _who_out is None and other_users and shutil.which("ps") is not None:
         try:
             ps_out = subprocess.check_output(["ps", "-eo", "user=,pcpu="], text=True, timeout=10)
@@ -512,6 +586,9 @@ def run_preflight_checks(
     models = load_models()
 
     gpus = detect_gpu_status()
+    target_indices = visible_gpu_indices(hw.cuda_visible_devices)
+    if target_indices is not None:
+        gpus = [g for g in gpus if g.index in target_indices]
     cuda_available = bool(torch.cuda.is_available())
     device_count = int(torch.cuda.device_count()) if cuda_available else 0
     bf16_supported = bool(torch.cuda.is_bf16_supported()) if cuda_available else False
@@ -533,7 +610,12 @@ def run_preflight_checks(
     hf_token_present = bool(os.environ.get("HF_TOKEN", "").strip())
 
     cred = check_credential_safety(root)
-    excl = check_server_exclusivity(lock_path=root / ".minorsafe.lock")
+    excl = check_server_exclusivity(
+        max_idle_mem_mb=1024 if hw.shared_host else 500,
+        lock_path=root / ".minorsafe.lock",
+        gpu_indices=target_indices,
+        shared_host=hw.shared_host,
+    )
 
     errors: list[str] = list(cred["errors"])
     warnings: list[str] = list(cred["warnings"])

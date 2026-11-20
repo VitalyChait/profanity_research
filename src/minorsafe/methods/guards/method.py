@@ -187,120 +187,170 @@ class GuardResponseMethod(ResponseMethod):
         is_enc = self.guard_arch == "encoder"
         return (float(np.clip(score, 0.0, 1.0)), n_tok, 0 if is_enc else 4), is_enc
 
+    def _score_batch_prompts_or_texts(
+        self,
+        prompts: list[str],
+        responses: list[str | None] | None = None,
+    ) -> tuple[list[tuple[float, int, int]], bool, float]:
+        """Batched guard scoring returning ([(p_unsafe, in_tok, out_tok), ...], is_encoder, total_ms)."""
+        if not prompts:
+            return [], (self._enc_guard is not None or self.guard_arch == "encoder"), 0.0
+        resps = responses if responses is not None else [None] * len(prompts)
+        t0 = time.perf_counter()
+        if self._enc_guard is not None:
+            txts = [f"{p}\n{r}" if r is not None else p for p, r in zip(prompts, resps, strict=True)]
+            probs, toks = self._enc_guard.score_texts(txts)
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            return [(float(pr), int(tk), 0) for pr, tk in zip(probs, toks, strict=True)], True, elapsed_ms
+        if self._dec_guard is not None:
+            pairs = list(zip(prompts, resps, strict=True))
+            scored = self._dec_guard.score_pairs_batch(pairs)
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            return scored, False, elapsed_ms
+
+        scored_cpu: list[tuple[float, int, int]] = []
+        is_enc = self.guard_arch == "encoder"
+        for p, r in zip(prompts, resps, strict=True):
+            res, is_enc = self._score_prompt_or_text(p, response=r)
+            scored_cpu.append(res)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        return scored_cpu, is_enc, elapsed_ms
+
     def respond(
         self, batch: list[Example], age_band: str = "teen_12_18", seed: int = 0
     ) -> list[MethodOutput]:
         assert self.generator is not None and self.ctx is not None
-        outputs: list[MethodOutput] = []
+        if not batch:
+            return []
 
-        for ex in batch:
-            t0 = time.perf_counter()
-            tok = TokenUsage()
-            prompt_txt = ex.last_user
+        n = len(batch)
+        outputs: list[MethodOutput | None] = [None] * n
+        in_scores = [0.0] * n
+        guard_ms_arr = [0.0] * n
+        toks = [TokenUsage() for _ in range(n)]
 
-            in_score = 0.0
-            guard_ms = 0.0
-            if self.placement in ("input", "both"):
-                tg0 = time.perf_counter()
-                (in_score, in_toks, in_out_toks), is_enc = self._score_prompt_or_text(prompt_txt)
-                guard_ms += (time.perf_counter() - tg0) * 1000.0
-                if is_enc:
-                    tok.encoder_in += in_toks
-                else:
-                    tok.guard_in += in_toks
-                    tok.guard_out += in_out_toks
-
-                if in_score >= self.threshold:
-                    fallback_msg = (self.ctx.prompts.get("fallback_responses") or {}).get(
-                        age_band,
-                        "I can't help with that request, let's explore a safe topic instead!",
-                    )
-                    e2e_ms = max(0.05, (time.perf_counter() - t0) * 1000.0)
-                    outputs.append(
-                        MethodOutput(
-                            example_id=ex.id,
-                            text=fallback_msg,
-                            raw_text=fallback_msg,
-                            blocked=True,
-                            action_taken="fallback",
-                            guard_score=in_score,
-                            tokens=tok,
-                            ttft_ms=e2e_ms * 0.5,
-                            e2e_ms=e2e_ms,
-                            decode_tok_per_s=0.0,
-                            effective_tok_per_s=len(fallback_msg.split()) / (e2e_ms / 1000.0),
-                            extra={
-                                "input_guard_score": in_score,
-                                "output_guard_score": float("nan"),
-                                "guard_threshold": self.threshold,
-                                "guard_ms": guard_ms,
-                            },
-                        )
-                    )
-                    continue
-
-            # Primary decoder generation (NO system prompt per Decision 4)
-            gr = self.generator.generate([ex.messages()], seed=seed)[0]
-            tok.generator_in += gr.n_in
-            tok.generator_out += gr.n_out
-            tok.generator_reasoning_out += gr.n_reasoning
-
-            out_score = 0.0
-            if self.placement in ("output", "both"):
-                tg1 = time.perf_counter()
-                (out_score, out_toks, out_gen_toks), is_enc = self._score_prompt_or_text(
-                    prompt_txt, response=gr.text
-                )
-                guard_ms += (time.perf_counter() - tg1) * 1000.0
-                if is_enc:
-                    tok.encoder_in += out_toks
-                else:
-                    tok.guard_in += out_toks
-                    tok.guard_out += out_gen_toks
-
-            combined_score = (
-                max(in_score, out_score)
-                if self.placement == "both"
-                else (out_score if self.placement == "output" else in_score)
+        need_gen: list[int] = []
+        if self.placement in ("input", "both"):
+            in_scored, is_enc, total_in_ms = self._score_batch_prompts_or_texts(
+                [ex.last_user for ex in batch]
             )
-            final_text = gr.text
-            action_taken = "none"
+            per_in_ms = total_in_ms / max(1, n)
+            fallback_msg = (self.ctx.prompts.get("fallback_responses") or {}).get(
+                age_band,
+                "I can't help with that request, let's explore a safe topic instead!",
+            )
+            for idx, (in_sc, in_tok, in_out_tok) in enumerate(in_scored):
+                in_scores[idx] = in_sc
+                guard_ms_arr[idx] += per_in_ms
+                if is_enc:
+                    toks[idx].encoder_in += in_tok
+                else:
+                    toks[idx].guard_in += in_tok
+                    toks[idx].guard_out += in_out_tok
 
-            if self.placement in ("output", "both") and out_score >= self.threshold:
-                suspect_words = (
-                    self._enc_guard.attribute_spans(gr.text) if self._enc_guard is not None else None
-                )
-                final_text, action_taken, extra_tok, _ = execute_moderation_action(
-                    action=self.action,
-                    example=ex,
-                    draft_text=gr.text,
-                    generator=self.generator,
-                    prompts=self.ctx.prompts,
-                    age_band=age_band,
-                    seed=seed,
-                    max_regenerations=self.max_regenerations,
-                    is_unsafe=lambda t, _p=prompt_txt: (
-                        self._score_prompt_or_text(_p, response=t)[0][0] >= self.threshold
-                    ),
-                    mlm_recomposer=self._mlm,
-                    extra_suspect_words=suspect_words,
-                    allow_placeholder_mlm=self._cpu_fixture_mode,
-                )
-                tok = tok + extra_tok
+                if in_sc >= self.threshold:
+                    e2e_ms = max(0.05, per_in_ms)
+                    outputs[idx] = MethodOutput(
+                        example_id=batch[idx].id,
+                        text=fallback_msg,
+                        raw_text=fallback_msg,
+                        blocked=True,
+                        action_taken="fallback",
+                        guard_score=in_sc,
+                        tokens=toks[idx],
+                        ttft_ms=e2e_ms * 0.5,
+                        e2e_ms=e2e_ms,
+                        decode_tok_per_s=0.0,
+                        effective_tok_per_s=len(fallback_msg.split()) / (e2e_ms / 1000.0),
+                        extra={
+                            "input_guard_score": in_sc,
+                            "output_guard_score": float("nan"),
+                            "guard_threshold": self.threshold,
+                            "guard_ms": guard_ms_arr[idx],
+                        },
+                    )
+                else:
+                    need_gen.append(idx)
+        else:
+            need_gen = list(range(n))
 
-            final_text, n_filtered = self.apply_post_filter(final_text)
-            e2e_ms = max(0.05, (time.perf_counter() - t0) * 1000.0)
-            eff_tok_s = max(1, self.generator.count_tokens(final_text)) / (e2e_ms / 1000.0)
-            extra = {
-                "input_guard_score": in_score,
-                "output_guard_score": out_score,
-                "guard_threshold": self.threshold,
-                "guard_ms": guard_ms,
-            }
-            if self.post_filter:
-                extra["post_filter_replacements"] = n_filtered
-            outputs.append(
-                MethodOutput(
+        if need_gen:
+            # Batched primary decoder generation (NO system prompt per Decision 4)
+            gen_results = self.generator.generate([batch[idx].messages() for idx in need_gen], seed=seed)
+            out_scored: list[tuple[float, int, int]] = []
+            per_out_ms = 0.0
+            is_enc_out = self.guard_arch == "encoder"
+            if self.placement in ("output", "both"):
+                out_scored, is_enc_out, total_out_ms = self._score_batch_prompts_or_texts(
+                    [batch[idx].last_user for idx in need_gen],
+                    responses=[gr.text for gr in gen_results],
+                )
+                per_out_ms = total_out_ms / max(1, len(need_gen))
+
+            for pos, (idx, gr) in enumerate(zip(need_gen, gen_results, strict=True)):
+                ex = batch[idx]
+                prompt_txt = ex.last_user
+                tok = toks[idx]
+                tok.generator_in += gr.n_in
+                tok.generator_out += gr.n_out
+                tok.generator_reasoning_out += gr.n_reasoning
+
+                gen_ms_each = max(0.01, gr.e2e_s * 1000.0 / max(1, len(need_gen)))
+                out_score = 0.0
+                if self.placement in ("output", "both"):
+                    out_score, out_tok, out_gen_tok = out_scored[pos]
+                    guard_ms_arr[idx] += per_out_ms
+                    if is_enc_out:
+                        tok.encoder_in += out_tok
+                    else:
+                        tok.guard_in += out_tok
+                        tok.guard_out += out_gen_tok
+
+                combined_score = (
+                    max(in_scores[idx], out_score)
+                    if self.placement == "both"
+                    else (out_score if self.placement == "output" else in_scores[idx])
+                )
+                final_text = gr.text
+                action_taken = "none"
+                action_ms = 0.0
+
+                if self.placement in ("output", "both") and out_score >= self.threshold:
+                    ta0 = time.perf_counter()
+                    suspect_words = (
+                        self._enc_guard.attribute_spans(gr.text) if self._enc_guard is not None else None
+                    )
+                    final_text, action_taken, extra_tok, _ = execute_moderation_action(
+                        action=self.action,
+                        example=ex,
+                        draft_text=gr.text,
+                        generator=self.generator,
+                        prompts=self.ctx.prompts,
+                        age_band=age_band,
+                        seed=seed,
+                        max_regenerations=self.max_regenerations,
+                        is_unsafe=lambda t, _p=prompt_txt: (
+                            self._score_prompt_or_text(_p, response=t)[0][0] >= self.threshold
+                        ),
+                        mlm_recomposer=self._mlm,
+                        extra_suspect_words=suspect_words,
+                        allow_placeholder_mlm=self._cpu_fixture_mode,
+                    )
+                    tok = tok + extra_tok
+                    action_ms = (time.perf_counter() - ta0) * 1000.0
+
+                final_text, n_filtered = self.apply_post_filter(final_text)
+                e2e_ms = max(0.05, gen_ms_each + guard_ms_arr[idx] + action_ms)
+                eff_tok_s = max(1, self.generator.count_tokens(final_text)) / (e2e_ms / 1000.0)
+                extra = {
+                    "input_guard_score": in_scores[idx],
+                    "output_guard_score": out_score,
+                    "guard_threshold": self.threshold,
+                    "guard_ms": guard_ms_arr[idx],
+                }
+                if self.post_filter:
+                    extra["post_filter_replacements"] = n_filtered
+                outputs[idx] = MethodOutput(
                     example_id=ex.id,
                     text=final_text,
                     raw_text=gr.raw_text,
@@ -316,8 +366,7 @@ class GuardResponseMethod(ResponseMethod):
                     effective_tok_per_s=eff_tok_s,
                     extra=extra,
                 )
-            )
-        return outputs
+        return [o for o in outputs if o is not None]
 
     def teardown(self) -> None:
         if self._enc_guard is not None:
