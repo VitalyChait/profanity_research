@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import torch
 from sklearn.decomposition import PCA
@@ -13,6 +15,7 @@ from minorsafe.generation import format_chat
 from minorsafe.methods.steering.hooks import ConceptDirection
 from minorsafe.registry import get_decoder_layers
 from minorsafe.telemetry.cost import SetupReport
+from minorsafe.utils import read_json, stable_hash, write_json
 
 
 def orthogonalize_vector(v_target: np.ndarray, v_nuisance: np.ndarray) -> np.ndarray:
@@ -281,3 +284,120 @@ def extract_steering_directions(
                 chosen_directions.append(best_cd)
 
     return chosen_directions, report
+
+
+def steering_setup_key(
+    model_alias: str,
+    quant: str,
+    estimator: str,
+    pooling: str,
+    layer_indices: list[int],
+    n_calib: int,
+    concepts: list[str],
+) -> str:
+    c_hash = stable_hash(sorted(concepts), length=6)
+    l_tag = "-".join(str(x) for x in layer_indices)
+    return f"steer_{model_alias}_{quant}_{estimator}_{pooling}_L{l_tag}_N{n_calib}_{c_hash}"
+
+
+def save_steering_artifact(
+    artifact_dir: Path,
+    setup_key: str,
+    directions: list[ConceptDirection],
+    report: SetupReport,
+) -> Path:
+    out_dir = Path(artifact_dir) / setup_key
+    out_dir.mkdir(parents=True, exist_ok=True)
+    meta_items = []
+    for cd in directions:
+        vec_file = f"{cd.concept}_layer_{cd.layer_idx}.pt"
+        torch.save(cd.vector.detach().cpu(), out_dir / vec_file)
+        meta_items.append(
+            {
+                "concept": cd.concept,
+                "layer_idx": int(cd.layer_idx),
+                "vector_file": vec_file,
+                "m_l": float(cd.m_l),
+                "s_l": float(cd.s_l),
+                "mu_pos": float(cd.mu_pos),
+                "sigma_pos": float(cd.sigma_pos),
+                "mu_neg": float(cd.mu_neg),
+                "sigma_neg": float(cd.sigma_neg),
+                "separability_auroc": float(cd.separability_auroc),
+                "extra": dict(cd.extra),
+            }
+        )
+    write_json(out_dir / "steering_meta.json", {"directions": meta_items, "setup": report.to_dict()})
+    return out_dir
+
+
+def load_steering_artifact(
+    artifact_dir: Path, setup_key: str
+) -> tuple[list[ConceptDirection], SetupReport] | None:
+    meta_path = Path(artifact_dir) / setup_key / "steering_meta.json"
+    if not meta_path.exists():
+        return None
+    meta = read_json(meta_path)
+    out_dir = meta_path.parent
+    dirs: list[ConceptDirection] = []
+    for item in meta.get("directions", []):
+        vec = torch.load(out_dir / item["vector_file"], map_location="cpu", weights_only=True)
+        dirs.append(
+            ConceptDirection(
+                concept=str(item["concept"]),
+                layer_idx=int(item["layer_idx"]),
+                vector=vec,
+                m_l=float(item["m_l"]),
+                s_l=float(item["s_l"]),
+                mu_pos=float(item.get("mu_pos", 0.0)),
+                sigma_pos=float(item.get("sigma_pos", 1.0)),
+                mu_neg=float(item.get("mu_neg", 0.0)),
+                sigma_neg=float(item.get("sigma_neg", 1.0)),
+                separability_auroc=float(item.get("separability_auroc", 0.5)),
+                extra=dict(item.get("extra", {})),
+            )
+        )
+    rep = SetupReport.from_dict(meta["setup"])
+    rep.cached = True
+    return dirs, rep
+
+
+def extract_or_load_directions(
+    *,
+    model,
+    tokenizer,
+    model_alias: str,
+    quant: str,
+    pairs: list[ContrastivePair],
+    concepts: list[str],
+    layer_indices: list[int],
+    artifact_dir: Path | None = None,
+    estimator: str = "pca",
+    orthogonal_concept: str | None = "slang_benign",
+    pooling: str = "mean_completion",
+    target_offset_sigma: float = 0.5,
+    n_calib: int = 100,
+) -> tuple[list[ConceptDirection], SetupReport]:
+    """Load cached steering directions from ``artifact_dir`` when available, else extract and cache."""
+    key = steering_setup_key(model_alias, quant, estimator, pooling, layer_indices, n_calib, concepts)
+    if artifact_dir is not None:
+        cached = load_steering_artifact(artifact_dir, key)
+        if cached is not None:
+            return cached
+
+    directions, rep = extract_steering_directions(
+        model=model,
+        tokenizer=tokenizer,
+        pairs=pairs,
+        concepts=concepts,
+        layer_indices=layer_indices,
+        estimator=estimator,
+        orthogonal_concept=orthogonal_concept,
+        pooling=pooling,
+        target_offset_sigma=target_offset_sigma,
+        n_calib=n_calib,
+    )
+    rep.setup_key = key
+    if artifact_dir is not None:
+        save_steering_artifact(artifact_dir, key, directions, rep)
+    return directions, rep

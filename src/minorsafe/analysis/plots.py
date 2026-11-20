@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from minorsafe.utils import read_json
+
 
 def _save_fig(fig: plt.Figure, fig_dir: Path, stem: str) -> Path:
     pdf_path = fig_dir / f"{stem}.pdf"
@@ -22,7 +24,11 @@ def _save_fig(fig: plt.Figure, fig_dir: Path, stem: str) -> Path:
     return pdf_path
 
 
-def generate_all_figures(summary_df: pd.DataFrame, fig_dir: Path) -> list[Path]:
+def generate_all_figures(
+    summary_df: pd.DataFrame,
+    fig_dir: Path,
+    tomography_dir: Path | None = None,
+) -> list[Path]:
     """Generate the 8 paper figures from summary_df into fig_dir."""
     fig_dir = Path(fig_dir)
     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -112,24 +118,71 @@ def generate_all_figures(summary_df: pd.DataFrame, fig_dir: Path) -> list[Path]:
     ax.grid(True, alpha=0.3)
     generated.append(_save_fig(fig, fig_dir, "fig6_recomposition_tradeoff"))
 
-    # 7. Subcultural Slang FPR vs Obfuscated Profanity Success
+    # 7. Subcultural Tomography Layer Curves (when available) or Slang FPR vs Obfuscated Success
     fig, ax = plt.subplots(figsize=(6, 4))
-    slang_col = df["slang_fpr"] if "slang_fpr" in df.columns else pd.Series(np.zeros(len(df)))
-    obf_col = df["obfuscated_success"] if "obfuscated_success" in df.columns else df["success_mean"]
-    ax.scatter(slang_col, obf_col, s=70, color="tab:red")
-    ax.set_xlabel("Benign Teen Slang False-Positive Rate (FPR)")
-    ax.set_ylabel("Obfuscated & Emoji Profanity Success")
-    ax.set_title("Fig 7: Subcultural Orthogonalization & Obfuscation Robustness")
+    tomo_files = (
+        sorted(p for p in Path(tomography_dir).glob("*.json") if p.name != "summary.json")
+        if tomography_dir is not None and Path(tomography_dir).exists()
+        else []
+    )
+    plotted_tomo = False
+    for tf in tomo_files[:8]:
+        rep = read_json(tf)
+        layers = rep.get("layers", []) if isinstance(rep, dict) else []
+        if not layers:
+            continue
+        depths = [float(lr.get("rel_depth", 0.0)) for lr in layers]
+        label = str(rep.get("model", tf.stem))
+        aurocs = [
+            float(lr.get("concepts", {}).get("profanity", {}).get("auroc", float("nan"))) for lr in layers
+        ]
+        if any(np.isfinite(aurocs)):
+            ax.plot(depths, aurocs, marker=".", label=f"{label} profanity AUROC")
+            plotted_tomo = True
+        cnames = layers[0].get("concept_names", [])
+        if "profanity" in cnames and "slang_benign" in cnames:
+            i_p, i_s = cnames.index("profanity"), cnames.index("slang_benign")
+            cos_vals = [float(lr["cosine_matrix"][i_p][i_s]) for lr in layers]
+            ax.plot(depths, cos_vals, linestyle="--", alpha=0.8, label=f"{label} cos(prof,slang)")
+            plotted_tomo = True
+    if plotted_tomo:
+        ax.set_xlabel("Normalized Layer Depth")
+        ax.set_ylabel("Linear Separability (AUROC) / Cosine Entanglement")
+        ax.set_title("Fig 7: Subcultural Latent Tomography Across Depth")
+        ax.legend(fontsize=6, ncol=2)
+    else:
+        slang_col = df["slang_fpr"] if "slang_fpr" in df.columns else pd.Series(np.zeros(len(df)))
+        obf_col = df["obfuscated_success"] if "obfuscated_success" in df.columns else df["success_mean"]
+        ax.scatter(slang_col, obf_col, s=70, color="tab:red")
+        ax.set_xlabel("Benign Teen Slang False-Positive Rate (FPR)")
+        ax.set_ylabel("Obfuscated & Emoji Profanity Success")
+        ax.set_title("Fig 7: Subcultural Orthogonalization & Obfuscation Robustness")
     ax.grid(True, alpha=0.3)
     generated.append(_save_fig(fig, fig_dir, "fig7_subcultural_tomography"))
 
-    # 8. Parameter Scale & Quantization Scaling
+    # 8. Parameter Scale & Quantization Scaling (SRI when available, else success vs params_b)
     fig, ax = plt.subplots(figsize=(6, 4))
-    params_col = df["params_b"] if "params_b" in df.columns else pd.Series(np.ones(len(df)))
-    ax.scatter(params_col, df["success_mean"], s=70, color="tab:purple")
-    ax.set_xlabel("Model Parameter Scale (Billions)")
-    ax.set_ylabel("Age-Appropriate Success Rate")
-    ax.set_title("Fig 8: Parameter Scale (<1B, 1B-4B, 7B-9B) & Quantization")
+    sri_rows = df.dropna(subset=["sri"]) if "sri" in df.columns else pd.DataFrame()
+    if not sri_rows.empty:
+        quants = (
+            sri_rows["quant"].astype(str)
+            if "quant" in sri_rows.columns
+            else pd.Series(["bf16"] * len(sri_rows))
+        )
+        for q_name in sorted(quants.unique()):
+            sub = sri_rows[quants == q_name]
+            ax.scatter(sub["params_b"], sub["sri"], s=70, label=str(q_name))
+        ax.axhline(0.95, color="gray", linestyle="--", linewidth=1.0, label="SRI=0.95")
+        ax.set_xlabel("Model Parameter Scale (Billions)")
+        ax.set_ylabel("Steerability Retention Index (SRI)")
+        ax.set_title("Fig 8: Parameter Scale & Quantization Steerability Retention (SRI)")
+        ax.legend(fontsize=7)
+    else:
+        params_col = df["params_b"] if "params_b" in df.columns else pd.Series(np.ones(len(df)))
+        ax.scatter(params_col, df["success_mean"], s=70, color="tab:purple")
+        ax.set_xlabel("Model Parameter Scale (Billions)")
+        ax.set_ylabel("Age-Appropriate Success Rate")
+        ax.set_title("Fig 8: Parameter Scale (<1B, 1B-4B, 7B-9B) & Quantization")
     ax.grid(True, alpha=0.3)
     generated.append(_save_fig(fig, fig_dir, "fig8_quantization_scaling"))
 

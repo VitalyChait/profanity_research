@@ -1,19 +1,27 @@
-"""Cross-family LLM Judge and 150-sample human annotation export & agreement (Decision 6)."""
+"""Cross-family LLM Judge (vLLM / HF / heuristic) and 150-sample human annotation export & agreement (Decision 6)."""
 
 from __future__ import annotations
 
+import gc
+import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 from scipy.stats import spearmanr
 from sklearn.metrics import cohen_kappa_score
 
+from minorsafe.config import ModelSpec, load_prompts
 from minorsafe.eval.fluency import compute_fluency_metrics
 from minorsafe.eval.readability import compute_readability_metrics
 from minorsafe.eval.safety import compute_safety_metrics
 from minorsafe.eval.semantic import compute_recomposition_metrics
-from minorsafe.utils import extract_json_object, seed_everything
+from minorsafe.generation import ChatGenerator
+from minorsafe.registry import checkpoint_id, free_model, load_decoder, load_tokenizer
+from minorsafe.utils import extract_json_object, get_logger, seed_everything
+
+log = get_logger(__name__)
 
 
 def _clamp_1_5(val, default: int = 4) -> int:
@@ -59,7 +67,7 @@ def heuristic_judge_score(
     reference_safe: str | None = None,
     target_fk_grade: float = 8.0,
 ) -> dict:
-    """Deterministic rubric evaluator used on cpu_debug and as fallback when vLLM judge is offline."""
+    """Deterministic rubric evaluator used on cpu_debug only."""
     saf = compute_safety_metrics(response, label_unsafe=label_unsafe, backend="lexicon")
     read = compute_readability_metrics(response, target_fk_grade=target_fk_grade)
     sem = compute_recomposition_metrics(
@@ -94,9 +102,192 @@ def heuristic_judge_score(
         "judge_helpful": helpful,
         "judge_fluent": fluent,
         "judge_is_refusal": saf["is_refusal"],
-        "judge_rationale": "Evaluated via rubric.",
+        "judge_rationale": "Evaluated via heuristic rubric (cpu_debug).",
         "judge_parse_ok": True,
+        "judge_tok_in": 0,
+        "judge_tok_out": 0,
+        "judge_wall_s": 0.0,
+        "judge_same_family": False,
     }
+
+
+class LLMJudge:
+    """Cross-family automated LLM Judge (vLLM or HuggingFace) with JSON parse retries."""
+
+    def __init__(
+        self,
+        judge_spec: ModelSpec,
+        backend: str = "vllm",
+        device: str = "cuda",
+        quant: str = "bf16",
+        vllm_gpu_memory_utilization: float = 0.85,
+        rubric_template: str | None = None,
+        max_retries: int = 2,
+    ) -> None:
+        self.spec = judge_spec
+        self.backend = backend
+        self.device = device
+        self.quant = quant
+        self.vllm_gpu_memory_utilization = vllm_gpu_memory_utilization
+        self.rubric_template = rubric_template or load_prompts()["judge_rubric"]
+        self.max_retries = max_retries
+        self._llm = None
+        self._tok = None
+        self._hf_model = None
+        self._hf_gen: ChatGenerator | None = None
+
+    def _ensure_loaded(self) -> None:
+        if self.backend == "vllm":
+            if self._llm is not None:
+                return
+            from vllm import LLM
+
+            ckpt = checkpoint_id(self.spec, self.quant)
+            self._tok = load_tokenizer(self.spec, self.quant)
+            self._llm = LLM(
+                model=ckpt,
+                dtype="auto",
+                gpu_memory_utilization=self.vllm_gpu_memory_utilization,
+                max_model_len=2048,
+                trust_remote_code=False,
+            )
+        elif self.backend == "hf":
+            if self._hf_gen is not None:
+                return
+            model, tok, _ = load_decoder(self.spec, quant=self.quant, device=self.device)
+            self._hf_model = model
+            self._tok = tok
+            self._hf_gen = ChatGenerator(model, tok, spec=self.spec, max_new_tokens=256, temperature=0.0)
+        else:
+            raise ValueError(f"LLMJudge requires backend 'vllm' or 'hf', got {self.backend!r}")
+
+    def _format_user_prompt(self, row: dict, strict_retry: bool = False) -> str:
+        body = self.rubric_template.format(
+            prompt=str(row.get("prompt") or ""),
+            label_unsafe=bool(row.get("label_unsafe", False)),
+            reference_safe=str(row.get("reference_safe") or "None"),
+            response=str(row.get("text") or ""),
+        )
+        if strict_retry:
+            body += "\nIMPORTANT: Return ONLY one valid JSON object and nothing else."
+        return body
+
+    def _run_vllm_batch(self, user_prompts: list[str]) -> list[tuple[str, int, int]]:
+        from vllm import SamplingParams
+
+        assert self._llm is not None and self._tok is not None
+        rendered = []
+        for p in user_prompts:
+            if getattr(self._tok, "chat_template", None):
+                try:
+                    rendered.append(
+                        self._tok.apply_chat_template(
+                            [{"role": "user", "content": p}],
+                            tokenize=False,
+                            add_generation_prompt=True,
+                        )
+                    )
+                    continue
+                except Exception:
+                    pass
+            rendered.append(p)
+        params = SamplingParams(temperature=0.0, max_tokens=256)
+        outputs = self._llm.generate(rendered, params)
+        results: list[tuple[str, int, int]] = []
+        for req_out in outputs:
+            txt = req_out.outputs[0].text if req_out.outputs else ""
+            n_in = len(req_out.prompt_token_ids or ())
+            n_out = len(req_out.outputs[0].token_ids) if req_out.outputs else 0
+            results.append((txt, n_in, n_out))
+        return results
+
+    def _run_hf_batch(self, user_prompts: list[str], batch_size: int = 8) -> list[tuple[str, int, int]]:
+        assert self._hf_gen is not None
+        results: list[tuple[str, int, int]] = []
+        for i in range(0, len(user_prompts), batch_size):
+            chunk = [[{"role": "user", "content": p}] for p in user_prompts[i : i + batch_size]]
+            gens = self._hf_gen.generate(chunk, seed=0)
+            for g in gens:
+                results.append((g.text, g.n_in, g.n_out + g.n_reasoning))
+        return results
+
+    def score_records(self, records: list[dict]) -> list[dict]:
+        """Score all response records in batches with up to ``max_retries`` JSON parse retries."""
+        if not records:
+            return []
+        self._ensure_loaded()
+        n = len(records)
+        verdicts: list[dict | None] = [None] * n
+        parse_flags: list[bool] = [False] * n
+        tok_in_totals = [0] * n
+        tok_out_totals = [0] * n
+        wall_totals = [0.0] * n
+
+        pending_indices = list(range(n))
+        for attempt in range(self.max_retries + 1):
+            if not pending_indices:
+                break
+            prompts = [
+                self._format_user_prompt(records[i], strict_retry=(attempt > 0)) for i in pending_indices
+            ]
+            t0 = time.perf_counter()
+            raw_outs = (
+                self._run_vllm_batch(prompts) if self.backend == "vllm" else self._run_hf_batch(prompts)
+            )
+            elapsed_per = (time.perf_counter() - t0) / max(1, len(pending_indices))
+
+            next_pending: list[int] = []
+            for idx, (raw_txt, n_in, n_out) in zip(pending_indices, raw_outs, strict=True):
+                tok_in_totals[idx] += n_in
+                tok_out_totals[idx] += n_out
+                wall_totals[idx] += elapsed_per
+                parsed, ok = parse_judge_json(raw_txt)
+                verdicts[idx] = parsed
+                parse_flags[idx] = ok
+                if not ok:
+                    next_pending.append(idx)
+            pending_indices = next_pending
+
+        out: list[dict] = []
+        for i, rec in enumerate(records):
+            v = verdicts[i] or parse_judge_json("")[0]
+            row_family = str(rec.get("family") or "").lower()
+            out.append(
+                {
+                    "judge_age_appropriate": v["age_appropriate"],
+                    "judge_meaning_preserved": v["meaning_preserved"],
+                    "judge_helpful": v["helpful"],
+                    "judge_fluent": v["fluent"],
+                    "judge_is_refusal": bool(v["is_refusal"]),
+                    "judge_rationale": v["rationale"],
+                    "judge_parse_ok": bool(parse_flags[i]),
+                    "judge_tok_in": int(tok_in_totals[i]),
+                    "judge_tok_out": int(tok_out_totals[i]),
+                    "judge_wall_s": float(wall_totals[i]),
+                    "judge_model": self.spec.alias,
+                    "judge_same_family": bool(row_family and row_family == self.spec.family.lower()),
+                }
+            )
+        return out
+
+    def close(self) -> None:
+        if self._llm is not None:
+            try:
+                from vllm.distributed.parallel_state import destroy_model_parallel
+
+                destroy_model_parallel()
+            except Exception:
+                pass
+            del self._llm
+            self._llm = None
+        if self._hf_model is not None or self._tok is not None:
+            free_model(self._hf_model, self._tok)
+        self._hf_model = None
+        self._hf_gen = None
+        self._tok = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 _BLIND_DROP_COLS = (

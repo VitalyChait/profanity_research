@@ -2,8 +2,8 @@
 
 Step-by-step operator guide for running the MinorSafe benchmark on a remote Linux GPU server behind a University VPN (both **automated** from your local machine and **manual** directly on the server). Every CLI command below is verified by `tests/unit/test_cli_entrypoints.py`.
 
-> [!WARNING]
-> **Placeholder components fail closed.** GPU profiles set `allow_placeholders: false`, so any phase that still depends on a CPU placeholder raises `PlaceholderBackendError` instead of producing numbers. Currently gated: M1 guards (`m1_encoder_guard`, `m1_decoder_guard`), M2 LoRA (`m2_lora`), the `mlm_substitute` action, `capability_eval`, the LLM judge (`judge_backend: vllm|hf`), and reference-LM perplexity (`ppl_model`). M0a/M0b and M3 steering (SwFC/StTP/StMP/Ortho, and the probe guard with a non-MLM action) are real. See `src/minorsafe/placeholders.py`.
+> [!NOTE]
+> **All Path A GPU backends are implemented.** On GPU profiles (`allow_placeholders: false`), M1 encoder/decoder guards (`m1_encoder_guard`, `m1_decoder_guard`), real MLM substitution (`MLMRecomposer`), M2 PEFT LoRA (`m2_lora`), M3 steering (`SwFC`/`StTP`/`StMP`/`Ortho`/probe + dev sweep + `tomography`), vLLM/HF `LLMJudge`, reference-LM perplexity (`ppl_model`), BERTScorer, teacher pair synthesis, and `tinyMMLU`/`tinyGSM8K` capability retention all run real GPU code without placeholders. Fail-closed `PlaceholderBackendError` guards remain active in `src/minorsafe/placeholders.py` if any caller invokes CPU placeholder paths without `allow_placeholders: true`.
 
 ---
 
@@ -15,7 +15,7 @@ Connect to your University VPN first, then configure local gitignored credential
 # 1. Create gitignored credentials file (never committed to this public repo)
 cp .remote.env.example .remote.env
 chmod 600 .remote.env
-# Edit .remote.env: set REMOTE_HOST, REMOTE_USER="root", REMOTE_SSH_KEY / REMOTE_PASSWORD, REMOTE_DIR, HF_TOKEN, etc.
+# Edit .remote.env: set REMOTE_HOST, REMOTE_USER="std-ai" (or "root"), REMOTE_SSH_KEY / REMOTE_PASSWORD, REMOTE_DIR, HF_TOKEN, etc.
 
 # 2. One-command entry point: installs git secret hook, sets up local .venv, installs SSH key on server
 #    (uses OpenSSH SSH_ASKPASS_REQUIRE=force when REMOTE_PASSWORD is set—no sshpass package needed),
@@ -108,6 +108,7 @@ make main PROFILE=gpu_80gb
 # Or single phases:
 make guards PROFILE=gpu_80gb                  # == bash scripts/run_phase.sh guards gpu_80gb
 bash scripts/run_phase.sh main gpu_80gb
+bash scripts/run_phase.sh tomography gpu_80gb   # required before analyze for H5 & H7
 DRY_RUN=1 bash scripts/run_phase.sh main gpu_80gb   # show the command only
 
 # Secondary / optional studies
@@ -161,7 +162,7 @@ Outputs in `results/`:
 | :--- | :--- |
 | `Cannot reach <host>:<port>` | Ensure University VPN is connected and verify `REMOTE_HOST` / `REMOTE_PORT` in `.remote.env`. |
 | `Server/GPU is not exclusive` / `minorsafe preflight` fails | Another user is logged in (`who`), a foreign GPU process is running, or `.minorsafe.lock` is active. Run `make remote-check` to inspect; override only intentionally with `--allow-busy` or `MINORSAFE_ALLOW_BUSY=1`. |
-| `PlaceholderBackendError: ... is a CPU placeholder` | Expected on GPU profiles until the component is implemented. Remove that method/flag from the experiment, or implement the real backend. Never set `allow_placeholders: true` on a profile used for reported results. |
+| `PlaceholderBackendError: ... is a CPU placeholder` | Only raised if a placeholder helper (e.g., `mlm_substitute` without `MLMRecomposer`) is invoked while `allow_placeholders: false`. Ensure the real backend (`MLMRecomposer`, etc.) is initialized and never set `allow_placeholders: true` on reported GPU runs. |
 | `PermissionError: ... targets the 'test' split` | Run via `run_phase.sh` (adds `--final` for test-split configs) or pass `--final` explicitly. |
 | `ValueError: No calibration pairs for steering concept ...` | The data build produced no pairs for a configured concept; check `results/data_card.md` and the method's `concepts`. |
 | Gated repo / 401 errors | `export HF_TOKEN=...` (or set in `.remote.env`) and accept the model licence on huggingface.co. |

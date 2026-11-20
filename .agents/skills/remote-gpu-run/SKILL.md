@@ -72,6 +72,7 @@ bash scripts/run_phase.sh guards gpu_80gb
 bash scripts/run_phase.sh recomposition gpu_80gb
 bash scripts/run_phase.sh subculture gpu_80gb
 bash scripts/run_phase.sh rampup gpu_80gb
+bash scripts/run_phase.sh tomography gpu_80gb
 bash scripts/run_phase.sh quant gpu_80gb
 ```
 
@@ -95,6 +96,6 @@ bash scripts/run_phase.sh analyze
 
 ## Known Repo Gotchas
 
-- **Aligned `Makefile` / CLI / `run_phase.sh` targets**: `make smoke`, `make data`, `make preflight`, `make main`, `make remote-*`, and `scripts/run_phase.sh` phase aliases (`rampup`/`ramp_up`, `guards`, `main`/`main_grid`, `recomposition`, `subculture`/`subculture_audit`, `quant`/`quant_grid`, `multiturn`, `analyze`) are aligned and verified by `tests/unit/test_cli_entrypoints.py`.
+- **Aligned `Makefile` / CLI / `run_phase.sh` targets**: `make smoke`, `make data`, `make preflight`, `make main`, `make remote-*`, and `scripts/run_phase.sh` phase aliases (`rampup`/`ramp_up`, `guards`, `main`/`main_grid`, `recomposition`, `subculture`/`subculture_audit`, `quant`/`quant_grid`, `tomography`, `multiturn`, `analyze`) are aligned and verified by `tests/unit/test_cli_entrypoints.py`.
 - **Exclusivity guard**: CUDA runs (`run_experiment` and `run_phase.sh`) abort if another user is logged in (`who`), a foreign GPU compute process is active, or `.minorsafe.lock` is held. Pass `--allow-busy` to `preflight` or set `MINORSAFE_ALLOW_BUSY=1` (`REQUIRE_EXCLUSIVE=0` in `.remote.env`) only when intentionally sharing.
-- **Fail-closed placeholder guard (`src/minorsafe/placeholders.py`)**: GPU profiles set `allow_placeholders: false` (default). Running `capability_eval` (`main_grid.yaml`) or placeholder-backed methods (`m1_encoder_guard`, `m1_decoder_guard`, `m2_lora`, `mlm_substitute` action) or `eval` with `judge_backend: vllm|hf` / `ppl_model` raises `PlaceholderBackendError` until real GPU implementations replace those placeholders.
+- **GPU backends & placeholder guard (`src/minorsafe/placeholders.py`)**: All benchmark methods (`m1_encoder_guard`, `m1_decoder_guard`, `MLMRecomposer`, `m2_lora`, `m3_steer_*`, `tomography`), evaluators (`LLMJudge`, `BERTScorer`, reference-LM PPL, `tinyMMLU`/`tinyGSM8K` capability retention), and teacher synthesis use real GPU implementations on `gpu_*` profiles. Placeholder fallbacks (`allow_placeholders: true`) are strictly restricted to `cpu_debug` tests and raise `PlaceholderBackendError` if called on GPU profiles.

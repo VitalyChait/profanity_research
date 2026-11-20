@@ -11,14 +11,19 @@ from minorsafe.analysis.tables import _df_to_markdown
 
 
 def generate_executive_report(
-    summary_df: pd.DataFrame, out_dir: Path, responses_df: pd.DataFrame | None = None
+    summary_df: pd.DataFrame,
+    out_dir: Path,
+    responses_df: pd.DataFrame | None = None,
+    tomography_dir: Path | None = None,
 ) -> Path:
     """Create results/REPORT.md with benchmark summary, raw token/time accounting, and H1-H10 verdicts."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     report_path = out_dir / "REPORT.md"
 
-    verdicts_df = pd.DataFrame(evaluate_hypotheses(summary_df, responses_df=responses_df))
+    verdicts_df = pd.DataFrame(
+        evaluate_hypotheses(summary_df, responses_df=responses_df, tomography_dir=tomography_dir)
+    )
     cols = [
         c
         for c in (

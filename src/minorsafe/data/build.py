@@ -5,14 +5,15 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
-from minorsafe.config import DataSpec, load_data_spec
+from minorsafe.config import DataSpec, load_data_spec, load_hardware, load_models
 from minorsafe.data.lexicons import is_english
 from minorsafe.data.obfuscation import generate_obfuscated_examples
 from minorsafe.data.schema import ContrastivePair, Example, save_examples, save_pairs
 from minorsafe.data.sources import load_all_sources
 from minorsafe.data.splits import assign_splits, check_split_leakage
 from minorsafe.data.synth import synthesize_contrastive_pairs
-from minorsafe.utils import DATA_DIR, RESULTS_DIR, get_logger
+from minorsafe.hardware import resolve_profile_name
+from minorsafe.utils import DATA_DIR, RESULTS_DIR, get_logger, write_json
 
 log = get_logger(__name__)
 
@@ -82,6 +83,7 @@ def build_dataset(
     data_dir: str | Path | None = None,
     results_dir: str | Path | None = None,
     offline: bool = True,
+    hardware_profile: str | None = None,
 ) -> tuple[list[Example], list[ContrastivePair], Path]:
     """Build processed examples.parquet, pairs.parquet, and results/data_card.md."""
     spec = spec or load_data_spec()
@@ -97,16 +99,38 @@ def build_dataset(
     )
     all_examples = assign_splits([*english_examples, *obf_examples], ratios=spec.split_ratios, seed=spec.seed)
 
-    raw_pairs, _ = synthesize_contrastive_pairs(
+    teacher_spec = None
+    teacher_backend = "mock"
+    device = "cpu"
+    vllm_util = 0.85
+    tox_backend = "lexicon"
+    if not offline and hardware_profile:
+        hw = load_hardware(resolve_profile_name(hardware_profile))
+        teacher_backend = hw.teacher_backend
+        device = hw.device
+        vllm_util = hw.vllm_gpu_memory_utilization
+        tox_backend = hw.eval.toxicity_backend
+        if hw.teacher:
+            models = load_models()
+            teacher_spec = models.get(hw.teacher)
+
+    raw_pairs, synth_rep = synthesize_contrastive_pairs(
         concepts=spec.concepts,
         pairs_per_concept=min(spec.synth_pairs_per_concept, 60 if offline else spec.synth_pairs_per_concept),
         seed=spec.seed,
+        teacher_spec=teacher_spec,
+        teacher_backend=teacher_backend,
+        oversample=spec.synth_oversample,
+        device=device,
+        vllm_gpu_memory_utilization=vllm_util,
+        toxicity_backend=tox_backend,
     )
     all_pairs = assign_splits(raw_pairs, ratios=spec.pair_split_ratios, seed=spec.seed)
 
     proc_dir = data_dir / "processed"
     save_examples(all_examples, proc_dir / "examples.parquet")
     save_pairs(all_pairs, proc_dir / "pairs.parquet")
+    write_json(results_dir / "data_synth_setup.json", synth_rep.to_dict())
     card_path = write_data_card(all_examples, all_pairs, results_dir / "data_card.md")
     log.info(
         "Dataset built: %d examples, %d pairs -> %s",

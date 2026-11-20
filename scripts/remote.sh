@@ -426,9 +426,15 @@ EOF
         "${cmd[@]}"
         ;;
 
+    gpu-test)
+        run_rsync_push
+        ENV_PRE="$(remote_env_prefix)"
+        run_ssh "${ENV_PRE} cd '${REMOTE_DIR}' && .venv/bin/python -m pytest -v -p no:cacheprovider -m gpu tests/gpu/"
+        ;;
+
     *)
         echo "Unknown subcommand: ${SUBCMD}" >&2
-        echo "Valid subcommands: check users setup-ssh-key sync setup preflight run status logs pull" >&2
+        echo "Valid subcommands: check users setup-ssh-key sync setup preflight gpu-test run status logs pull" >&2
         exit 1
         ;;
 esac

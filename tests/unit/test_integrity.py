@@ -55,7 +55,89 @@ def test_placeholder_guard_profile_flags_and_require_real_backend():
         require_real_backend(gpu_hw, "test_component", "unit test")
 
 
-def test_eval_backends_fail_closed_for_unimplemented_settings():
+def test_mlm_substitute_action_fails_closed_without_real_recomposer(
+    dummy_lm, dummy_tokenizer, dummy_model_spec, sample_examples
+):
+    from minorsafe.generation import ChatGenerator
+    from minorsafe.methods.actions import execute_moderation_action
+
+    gen = ChatGenerator(dummy_lm, dummy_tokenizer, dummy_model_spec)
+    ex = sample_examples[0]
+    with pytest.raises(PlaceholderBackendError, match="mlm_substitute"):
+        execute_moderation_action(
+            action="mlm_substitute",
+            example=ex,
+            draft_text="what the fuck is this",
+            generator=gen,
+            prompts=load_prompts(),
+            mlm_recomposer=None,
+            allow_placeholder_mlm=False,
+        )
+
+    out_text, action, _tok, _lat = execute_moderation_action(
+        action="mlm_substitute",
+        example=ex,
+        draft_text="what the fuck is this",
+        generator=gen,
+        prompts=load_prompts(),
+        mlm_recomposer=None,
+        allow_placeholder_mlm=True,
+    )
+    assert action == "mlm_substitute"
+    assert "fuck" not in out_text.lower()
+
+
+def test_eval_backends_dispatch_real_evaluators(monkeypatch):
+    import minorsafe.eval.evaluate as ev_mod
+
+    called = {"judge": False, "fluency": False, "semantic": False}
+
+    class _FakeJudge:
+        def __init__(self, judge_spec, backend="vllm", **kwargs):
+            called["judge"] = backend == "vllm"
+
+        def score_records(self, items):
+            return [
+                {
+                    "judge_age_appropriate": 5,
+                    "judge_meaning_preserved": 5,
+                    "judge_helpful": 4,
+                    "judge_fluent": 5,
+                    "judge_is_refusal": False,
+                    "judge_tok_in": 20,
+                    "judge_tok_out": 15,
+                    "judge_wall_s": 0.05,
+                    "judge_parse_ok": True,
+                }
+                for _ in items
+            ]
+
+        def close(self):
+            pass
+
+    def _fake_fluency(texts, m0_texts=None, **kwargs):
+        called["fluency"] = kwargs.get("ppl_model") is not None
+        return [
+            {
+                "fk_grade": 6.0,
+                "fk_compliant": True,
+                "ppl_m0": 10.0,
+                "ppl_method": 10.5,
+                "ppl_delta_pct": 5.0,
+                "repetition_rate": 0.0,
+            }
+            for _ in texts
+        ]
+
+    def _fake_semantic(**kwargs):
+        called["semantic"] = kwargs.get("bertscore_model") is not None
+        preds = kwargs["predictions"]
+        return [{"bertscore_f1_ref": 0.9, "bertscore_f1_m0": 0.95, "sari_score": 60.0} for _ in preds]
+
+    monkeypatch.setattr(ev_mod, "LLMJudge", _FakeJudge)
+    monkeypatch.setattr(ev_mod, "compute_fluency_metrics_batch", _fake_fluency)
+    monkeypatch.setattr(ev_mod, "compute_recomposition_metrics_batch", _fake_semantic)
+
     df = pd.DataFrame(
         [
             {
@@ -63,33 +145,29 @@ def test_eval_backends_fail_closed_for_unimplemented_settings():
                 "prompt": "Hello",
                 "text": "Hi there, how can I help?",
                 "label_unsafe": False,
+                "reference_safe": "Hello, how can I assist?",
             }
         ]
     )
-    with pytest.raises(PlaceholderBackendError, match="judge_backend"):
-        evaluate_responses_df(
-            df,
-            eval_settings=EvalSettings(
-                judge_backend="vllm",
-                ppl_model=None,
-                toxicity_backend="lexicon",
-                bertscore_model=None,
-            ),
-        )
-    with pytest.raises(PlaceholderBackendError, match="ppl_model"):
-        evaluate_responses_df(
-            df,
-            eval_settings=EvalSettings(
-                judge_backend="heuristic",
-                ppl_model="gpt2-large",
-                toxicity_backend="lexicon",
-                bertscore_model=None,
-            ),
-        )
+    gpu_eval = load_hardware("gpu_80gb").eval
+    out = evaluate_responses_df(
+        df,
+        eval_settings=EvalSettings(
+            judge_backend="vllm",
+            judge_model=gpu_eval.judge_model,
+            ppl_model="qwen25_15b",
+            toxicity_backend="lexicon",
+            bertscore_model="roberta-large",
+        ),
+        models=load_models(),
+    )
+    assert all(called.values())
+    assert float(out["bertscore_f1_ref"].iloc[0]) == pytest.approx(0.9)
+    assert int(out["judge_tok_in"].iloc[0]) == 20
 
 
 @pytest.mark.parametrize("method_name", ["m1_encoder_guard", "m1_decoder_guard", "m2_lora"])
-def test_placeholder_methods_fail_closed_on_gpu_profile(
+def test_gpu_profile_methods_use_real_loaders_instead_of_cpu_placeholders(
     method_name: str,
     dummy_lm,
     dummy_tokenizer,
@@ -97,13 +175,70 @@ def test_placeholder_methods_fail_closed_on_gpu_profile(
     sample_examples,
     sample_pairs,
     tmp_path: Path,
+    monkeypatch,
 ):
+    import minorsafe.methods.guards.method as gm
+    import minorsafe.methods.lora.method as lm
+    from minorsafe.telemetry.cost import SetupReport
+
+    called = {"enc": False, "dec": False, "lora": False}
+
+    class _FakeGuard:
+        threshold = 0.5
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        gm.EncoderGuard,
+        "from_spec",
+        classmethod(
+            lambda cls, *a, **kw: (
+                called.__setitem__("enc", True)
+                or (_FakeGuard(), SetupReport(method="m1_encoder_guard", setup_key="enc_test"))
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        gm.DecoderGuard,
+        "from_spec",
+        classmethod(lambda cls, *a, **kw: called.__setitem__("dec", True) or _FakeGuard()),
+    )
+    monkeypatch.setattr(
+        gm.MLMRecomposer,
+        "from_spec",
+        classmethod(lambda cls, *a, **kw: _FakeGuard()),
+    )
+
+    class _FakePeftModel:
+        def merge_and_unload(self):
+            return dummy_lm
+
+        def eval(self):
+            return self
+
+    monkeypatch.setattr(
+        lm,
+        "train_lora_adapter",
+        lambda *a, **kw: (
+            called.__setitem__("lora", True)
+            or (_FakePeftModel(), SetupReport(method="m2_lora", setup_key="lora_test"))
+        ),
+    )
+
     ctx = _make_ctx(
         "gpu_80gb", dummy_lm, dummy_tokenizer, dummy_model_spec, sample_examples, sample_pairs, tmp_path
     )
-    method = create_method(load_method(method_name))
-    with pytest.raises(PlaceholderBackendError):
-        method.setup(ctx)
+    params = {"train_mode": "zeroshot"} if method_name == "m1_encoder_guard" else {}
+    spec = load_method(method_name)
+    if params:
+        spec = MethodSpec(name=spec.name, kind=spec.kind, params={**spec.params, **params})
+    method = create_method(spec)
+    method.setup(ctx)
+    method.teardown()
+
+    expected_key = {"m1_encoder_guard": "enc", "m1_decoder_guard": "dec", "m2_lora": "lora"}[method_name]
+    assert called[expected_key] is True
 
 
 def test_no_hidden_lexicon_post_filter_on_m2_m3():

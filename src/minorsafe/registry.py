@@ -124,7 +124,10 @@ def load_decoder(spec: ModelSpec, quant: str = "bf16", device: str | None = None
 
 
 def load_encoder_classifier(
-    spec_or_path: ModelSpec | str, num_labels: int = 2, device: str | None = None, quant: str = "bf16"
+    spec_or_path: ModelSpec | str,
+    num_labels: int | None = None,
+    device: str | None = None,
+    quant: str = "bf16",
 ):
     """Load an encoder (or decoder) with a sequence-classification head."""
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -132,11 +135,13 @@ def load_encoder_classifier(
     device = device or default_device()
     path = spec_or_path.hf_id if isinstance(spec_or_path, ModelSpec) else spec_or_path
     t0 = time.perf_counter()
-    kwargs = dict(num_labels=num_labels, dtype=compute_dtype(quant, device))
+    kwargs: dict = dict(dtype=compute_dtype(quant, device))
+    if num_labels is not None:
+        kwargs["num_labels"] = num_labels
     kwargs.update(_quant_kwargs(quant, device))
     try:
         model = AutoModelForSequenceClassification.from_pretrained(path, trust_remote_code=False, **kwargs)
-    except ValueError:
+    except (ValueError, KeyError):
         # e.g. EuroBERT ships custom modeling code
         model = AutoModelForSequenceClassification.from_pretrained(path, trust_remote_code=True, **kwargs)
     if "quantization_config" not in kwargs:

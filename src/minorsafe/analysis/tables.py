@@ -70,7 +70,10 @@ def _df_to_latex(df: pd.DataFrame, caption: str, label: str) -> str:
 
 
 def generate_all_tables(
-    summary_df: pd.DataFrame, tables_dir: Path, responses_df: pd.DataFrame | None = None
+    summary_df: pd.DataFrame,
+    tables_dir: Path,
+    responses_df: pd.DataFrame | None = None,
+    tomography_dir: Path | None = None,
 ) -> list[Path]:
     """Write Markdown and LaTeX tables for main benchmark and hypothesis verdicts.
 
@@ -105,7 +108,9 @@ def generate_all_tables(
     )
     paths.extend([md_main, tex_main])
 
-    verdicts_df = pd.DataFrame(evaluate_hypotheses(summary_df, responses_df=responses_df))
+    verdicts_df = pd.DataFrame(
+        evaluate_hypotheses(summary_df, responses_df=responses_df, tomography_dir=tomography_dir)
+    )
     md_hyp = tables_dir / "hypothesis_verdicts.md"
     tex_hyp = tables_dir / "hypothesis_verdicts.tex"
     md_hyp.write_text(_df_to_markdown(verdicts_df), encoding="utf-8")

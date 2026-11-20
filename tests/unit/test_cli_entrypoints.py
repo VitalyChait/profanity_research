@@ -28,6 +28,7 @@ PHASES = [
     "main",
     "recomposition",
     "subculture",
+    "tomography",
     "quant",
     "multiturn",
     "analyze",

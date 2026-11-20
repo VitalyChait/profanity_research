@@ -1,9 +1,4 @@
-"""M2 LoRA / QLoRA fine-tuning and inference method (Phase 5.3).
-
-PLACEHOLDER: the current trainer is NOT PEFT LoRA (it fine-tunes the last two parameter tensors on a
-handful of pairs without prompt masking). It is gated by ``require_real_backend`` so it can only run on
-profiles with ``allow_placeholders: true``. Replace with a PEFT LoRA/QLoRA trainer (plan §5.3).
-"""
+"""M2 LoRA / QLoRA fine-tuning and inference method (Phase 5.3)."""
 
 from __future__ import annotations
 
@@ -14,36 +9,27 @@ import torch
 from minorsafe.data.schema import Example
 from minorsafe.generation import format_chat
 from minorsafe.methods.base import MethodOutput, ResponseMethod, RunContext
-from minorsafe.placeholders import require_real_backend
+from minorsafe.methods.lora.train import train_lora_adapter
 from minorsafe.telemetry.cost import SetupReport
 from minorsafe.telemetry.tokens import TokenUsage
 
 
 class LoRAResponseMethod(ResponseMethod):
-    def setup(self, ctx: RunContext) -> SetupReport:
-        require_real_backend(
-            ctx.hardware,
-            "M2 LoRA trainer",
-            "not PEFT LoRA: trains last 2 tensors, <=16 pairs, no prompt masking",
-        )
-        self._init_generator(ctx)
+    def _setup_cpu_fixture(self, ctx: RunContext) -> SetupReport:
+        """Fast offline SFT step for DummyCausalLM unit/integration tests."""
         assert self.model is not None and self.tokenizer is not None
-        if not self._owns_model:
-            # Never mutate a shared preloaded model in place: later runs would inherit the trained weights.
-            self.model = copy.deepcopy(self.model)
-            self.generator = self._make_generator(ctx)
+        self.model = copy.deepcopy(self.model)
+        self.generator = self._make_generator(ctx)
         n_calib = int(self.spec.params.get("n_calib", 50))
         epochs = int(self.spec.params.get("epochs", 1))
         lr = float(self.spec.params.get("lr", 2.0e-4))
         rep = SetupReport(
             method=self.name,
-            setup_key=f"{self.name}_{ctx.generator_spec.alias}_N{n_calib}",
+            setup_key=f"{self.name}_{ctx.generator_spec.alias}_N{n_calib}_cpu_fixture",
         )
-
         pairs = ctx.calib_pairs[:n_calib]
         with rep.stage("train_lora_adapter", examples=len(pairs) * epochs) as st:
             dev = next(self.model.parameters()).device
-            # Fine-tune lm_head / low-rank projection on positive completions (no system prompt)
             trainable = [p for p in self.model.parameters() if p.requires_grad]
             if trainable and pairs:
                 opt = torch.optim.AdamW(trainable[-2:], lr=lr)
@@ -68,6 +54,50 @@ class LoRAResponseMethod(ResponseMethod):
             self.model.eval()
         return rep
 
+    def setup(self, ctx: RunContext) -> SetupReport:
+        self._init_generator(ctx)
+        assert self.model is not None and self.tokenizer is not None
+
+        if ctx.hardware.allow_placeholders and ctx.preloaded_generator is not None:
+            return self._setup_cpu_fixture(ctx)
+
+        concepts = self.spec.params.get("concepts")
+        n_calib = int(self.spec.params.get("n_calib", 500))
+        r = int(self.spec.params.get("r", 16))
+        lora_alpha = int(self.spec.params.get("lora_alpha", 32))
+        lora_dropout = float(self.spec.params.get("lora_dropout", 0.05))
+        lr = float(self.spec.params.get("lr", 2.0e-4))
+        epochs = int(self.spec.params.get("epochs", 2))
+        batch_size = int(self.spec.params.get("batch_size", 4))
+        merge_adapter = bool(self.spec.params.get("merge_adapter", True))
+
+        peft_model, rep = train_lora_adapter(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            gen_spec=ctx.generator_spec,
+            calib_pairs=ctx.calib_pairs,
+            artifact_dir=ctx.artifact_dir,
+            concepts=list(concepts) if concepts else None,
+            n_calib=n_calib,
+            r=r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            lr=lr,
+            epochs=epochs,
+            batch_size=batch_size,
+            quant=ctx.quant,
+            method_name=self.name,
+        )
+
+        # Merge adapter into base weights when unquantized so inference adds zero adapter latency.
+        if merge_adapter and ctx.quant not in ("int8", "nf4", "awq", "gptq", "fp8"):
+            self.model = peft_model.merge_and_unload()
+        else:
+            self.model = peft_model
+        self.model.eval()
+        self.generator = self._make_generator(ctx)
+        return rep
+
     def respond(
         self, batch: list[Example], age_band: str = "teen_12_18", seed: int = 0
     ) -> list[MethodOutput]:
@@ -77,7 +107,7 @@ class LoRAResponseMethod(ResponseMethod):
         gen_results = self.generator.generate(batch_msgs, seed=seed)
 
         outputs: list[MethodOutput] = []
-        for ex, gr in zip(batch, gen_results, strict=False):
+        for ex, gr in zip(batch, gen_results, strict=True):
             tok = TokenUsage(
                 generator_in=gr.n_in,
                 generator_out=gr.n_out,

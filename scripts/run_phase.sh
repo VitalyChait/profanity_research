@@ -30,7 +30,8 @@ run_experiment() {
 
 case "${PHASE}" in
     smoke)                    CMD=("${CLI[@]}" smoke --hardware cpu_debug) ;;
-    data)                     CMD=("${CLI[@]}" data build) ;;
+    data)                     CMD=("${CLI[@]}" data build --hardware "${PROFILE}") ;;
+    tomography)               CMD=("${CLI[@]}" tomography --hardware "${PROFILE}") ;;
     rampup|ramp_up)           run_experiment ramp_up ;;
     guards)                   run_experiment guards ;;
     main|main_grid)           run_experiment main_grid ;;

@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import contextlib
+import gc
 import json
 import math
 import os
+from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import torch
 
 from minorsafe.config import (
     load_age_bands,
@@ -22,15 +26,15 @@ from minorsafe.config import (
 )
 from minorsafe.data.build import build_dataset
 from minorsafe.data.schema import Example, load_examples, load_pairs
+from minorsafe.eval.capability import evaluate_capability_retention
 from minorsafe.eval.evaluate import evaluate_responses_df
 from minorsafe.eval.judge import export_human_annotation_sheet
 from minorsafe.hardware import acquire_run_lock, check_server_exclusivity
 from minorsafe.methods.base import MethodOutput, RunContext, create_method
-from minorsafe.placeholders import require_real_backend
 from minorsafe.runner.grid import RunSpec, expand_experiment_grid, verify_split_guardrail
 from minorsafe.runner.store import RunStore
 from minorsafe.telemetry import GPUSampler, SmartRunLogger
-from minorsafe.utils import DATA_DIR, RESULTS_DIR, read_json, write_json
+from minorsafe.utils import DATA_DIR, RESULTS_DIR, git_sha, package_versions, read_json, write_json
 
 
 def _output_to_row(
@@ -132,13 +136,6 @@ def run_experiment(
     exp_runs_dir = (runs_root or (RESULTS_DIR / "runs")) / exp.name
     completed_dirs: list[Path] = []
 
-    if exp.capability_eval:
-        # Capability retention (tinyMMLU / tinyGSM8K) is not wired into the runner yet; do not let the
-        # config flag silently do nothing on profiles used for reported results.
-        require_real_backend(
-            profile, "capability_eval", "tinyMMLU/tinyGSM8K retention is not wired into the runner"
-        )
-
     batch_size = max(1, int(exp.batch_size or profile.batch_size))
     log_dir = (runs_root.parent if runs_root else RESULTS_DIR) / "logs"
     smart_log = SmartRunLogger(
@@ -155,6 +152,58 @@ def run_experiment(
         else contextlib.nullcontext()
     )
 
+    sha = git_sha()
+    pkgs = package_versions()
+
+    def _write_manifest(rdir: Path, rspec: RunSpec, status: str) -> None:
+        write_json(
+            rdir / "manifest.json",
+            {
+                "run_id": rspec.run_id,
+                "experiment": exp.name,
+                "git_sha": sha,
+                "packages": pkgs,
+                "hardware_profile": profile.name,
+                "run_spec": asdict(rspec),
+                "status": status,
+                "updated_at": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+            },
+        )
+
+    def _run_batch_with_oom_retry(method, chunk: list[Example], age_band_name: str, seed: int, bs: int):
+        """Run ``method.respond`` over ``chunk``, halving batch size on CUDA OOM up to 2 times."""
+        cur_bs = bs
+        outputs: list[MethodOutput] = []
+        pos = 0
+        retries = 0
+        while pos < len(chunk):
+            sub = chunk[pos : pos + cur_bs]
+            try:
+                if profile.device == "cuda":
+                    with GPUSampler() as gpu_s:
+                        sub_outs = method.respond(sub, age_band=age_band_name, seed=seed)
+                    per_item_energy = gpu_s.energy_j / max(1, len(sub_outs))
+                    for out in sub_outs:
+                        if not math.isfinite(out.energy_j):
+                            out.energy_j = per_item_energy
+                        if not math.isfinite(out.peak_vram_mb):
+                            out.peak_vram_mb = gpu_s.peak_mem_mb
+                else:
+                    sub_outs = method.respond(sub, age_band=age_band_name, seed=seed)
+                outputs.extend(sub_outs)
+                pos += len(sub)
+            except torch.cuda.OutOfMemoryError:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                if cur_bs <= 1 or retries >= 2:
+                    raise
+                cur_bs = max(1, cur_bs // 2)
+                retries += 1
+        return outputs, cur_bs
+
+    run_records: list[tuple[int, RunSpec, Path, RunStore, bool]] = []
+
     try:
         with lock_ctx:
             for run_idx, rspec in enumerate(specs, start=1):
@@ -162,12 +211,13 @@ def run_experiment(
                 store = RunStore(run_dir)
                 done = store.completed_keys()
 
-                age_band = age_bands[rspec.age_band]
                 gen_spec = models[rspec.generator_alias]
                 todo_by_seed = {s: [ex for ex in split_examples if (ex.id, s) not in done] for s in exp.seeds}
                 pending = any(todo_by_seed.values())
+                need_cap = bool(exp.capability_eval and not (run_dir / "capability.json").exists())
 
-                if pending:
+                if pending or need_cap:
+                    _write_manifest(run_dir, rspec, "running")
                     ctx = RunContext(
                         hardware=profile,
                         generator_spec=gen_spec,
@@ -199,32 +249,26 @@ def run_experiment(
                     try:
                         # Discarded warmup queries (plan §2.2) so CUDA/kernel initialisation is not timed.
                         warm = split_examples[: max(0, exp.warmup_queries)]
-                        if warm:
+                        if pending and warm:
                             method.respond(
                                 warm, age_band=rspec.age_band, seed=exp.seeds[0] if exp.seeds else 0
                             )
 
+                        cur_bs = batch_size
                         for seed, todo in todo_by_seed.items():
                             # Generate and checkpoint batch by batch, so a crash loses at most one batch.
-                            for i in range(0, len(todo), batch_size):
-                                chunk = todo[i : i + batch_size]
-                                if profile.device == "cuda":
-                                    with GPUSampler() as gpu_s:
-                                        outputs = method.respond(chunk, age_band=rspec.age_band, seed=seed)
-                                    per_item_energy = gpu_s.energy_j / max(1, len(outputs))
-                                    for out in outputs:
-                                        if not math.isfinite(out.energy_j):
-                                            out.energy_j = per_item_energy
-                                        if not math.isfinite(out.peak_vram_mb):
-                                            out.peak_vram_mb = gpu_s.peak_mem_mb
-                                else:
-                                    outputs = method.respond(chunk, age_band=rspec.age_band, seed=seed)
-
+                            i = 0
+                            while i < len(todo):
+                                chunk = todo[i : i + cur_bs]
+                                outputs, cur_bs = _run_batch_with_oom_retry(
+                                    method, chunk, rspec.age_band, seed, cur_bs
+                                )
                                 rows = [
                                     _output_to_row(out, rspec, gen_spec, seed, ex)
                                     for ex, out in zip(chunk, outputs, strict=True)
                                 ]
                                 store.append_responses(rows)
+                                i += len(chunk)
 
                                 finite_vram = [
                                     o.peak_vram_mb for o in outputs if math.isfinite(o.peak_vram_mb)
@@ -234,7 +278,7 @@ def run_experiment(
                                     run_idx=run_idx,
                                     run_id=rspec.run_id,
                                     seed=seed,
-                                    batch_done=min(len(todo), i + len(chunk)),
+                                    batch_done=min(len(todo), i),
                                     total_todo=len(todo),
                                     batch_e2e_ms=float(np.mean([o.e2e_ms for o in outputs]))
                                     if outputs
@@ -245,6 +289,22 @@ def run_experiment(
                                     peak_vram_mb=max(finite_vram) if finite_vram else float("nan"),
                                     energy_j=sum(finite_energy) if finite_energy else float("nan"),
                                 )
+
+                        if need_cap:
+                            cap_res = evaluate_capability_retention(
+                                method,
+                                age_band=rspec.age_band,
+                                max_items=profile.eval.capability_items,
+                                use_real_benchmarks=(
+                                    not profile.allow_placeholders and preloaded_generator is None
+                                ),
+                                batch_size=cur_bs,
+                                data_dir=base_data_dir,
+                            )
+                            write_json(run_dir / "capability.json", cap_res)
+                    except BaseException:
+                        _write_manifest(run_dir, rspec, "failed")
+                        raise
                     finally:
                         method.teardown()
                 else:
@@ -261,14 +321,32 @@ def run_experiment(
                         setup_tokens=int(setup_data.get("total_tokens", 0)),
                     )
 
+                run_records.append((run_idx, rspec, run_dir, store, pending))
+
+            # Evaluate M0a baseline shards first so bertscore_f1_m0 and ppl_delta_pct compare against M0a.
+            ordered_eval = sorted(
+                run_records,
+                key=lambda item: (0 if item[1].method_spec.name == "m0a_raw" else 1, item[0]),
+            )
+            m0_dfs: list[pd.DataFrame] = []
+            for run_idx, rspec, run_dir, store, pending in ordered_eval:
                 df = store.load_responses()
+                age_band = age_bands[rspec.age_band]
                 if exp.evaluate and not df.empty and (pending or "success" not in df.columns):
+                    baseline_m0_df = pd.concat(m0_dfs, ignore_index=True) if m0_dfs else None
                     df = evaluate_responses_df(
                         df,
                         eval_settings=profile.eval,
                         target_fk_grade=age_band.target_fk_grade,
+                        models=models,
+                        device=profile.device,
+                        vllm_gpu_memory_utilization=profile.vllm_gpu_memory_utilization,
+                        baseline_m0_df=baseline_m0_df,
                     )
                     df.to_parquet(store.responses_path, index=False)
+
+                if rspec.method_spec.name == "m0a_raw" and not df.empty:
+                    m0_dfs.append(df)
 
                 succ_mean = (
                     float(df["success"].mean()) if (not df.empty and "success" in df.columns) else None
@@ -276,6 +354,7 @@ def run_experiment(
                 smart_log.finish_run(
                     run_idx=run_idx, run_id=rspec.run_id, n_rows=len(df), success_mean=succ_mean
                 )
+                _write_manifest(run_dir, rspec, "completed")
                 completed_dirs.append(run_dir)
     except BaseException as exc:
         smart_log.fail_experiment(exc, completed_runs=len(completed_dirs))

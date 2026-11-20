@@ -117,6 +117,7 @@ def cmd_preflight(
 
 @data_app.command("build")
 def cmd_data_build(
+    hardware: str = _hardware_option(),
     override: list[str] = typer.Option(None, "--override", "-o"),
     offline: bool = typer.Option(
         False, "--offline", help="Use only the built-in seed corpus (no HF downloads)."
@@ -125,7 +126,11 @@ def cmd_data_build(
     """Build evaluation examples, contrastive pairs, obfuscated variants, and results/data_card.md."""
     spec = load_data_spec(overrides=override)
     examples, pairs, card_path = build_dataset(
-        spec, data_dir=DATA_DIR, results_dir=RESULTS_DIR, offline=offline
+        spec,
+        data_dir=DATA_DIR,
+        results_dir=RESULTS_DIR,
+        offline=offline,
+        hardware_profile=None if offline else hardware,
     )
     typer.echo(f"Built {len(examples)} examples and {len(pairs)} pairs. Data card: {card_path}")
 
@@ -161,13 +166,31 @@ def cmd_eval(
     hardware: str = _hardware_option(),
 ) -> None:
     """Re-evaluate saved responses.parquet shards for an experiment."""
+    from minorsafe.config import load_models
+
     hw = load_hardware(resolve_profile_name(hardware))
+    models = load_models()
     age_band = load_age_bands()["teen_12_18"]
     exp_dir = RESULTS_DIR / "runs" / experiment
-    for pq in sorted(exp_dir.rglob("responses.parquet")):
+    pqs = sorted(exp_dir.rglob("responses.parquet"))
+    # Evaluate m0a_raw shards first so non-M0a shards get M0a PPL and text baselines.
+    ordered = sorted(pqs, key=lambda p: (0 if "m0a_raw" in p.parent.name else 1, str(p)))
+    m0_dfs: list[pd.DataFrame] = []
+    for pq in ordered:
         df = pd.read_parquet(pq)
-        eval_df = evaluate_responses_df(df, eval_settings=hw.eval, target_fk_grade=age_band.target_fk_grade)
+        base_m0 = pd.concat(m0_dfs, ignore_index=True) if m0_dfs else None
+        eval_df = evaluate_responses_df(
+            df,
+            eval_settings=hw.eval,
+            target_fk_grade=age_band.target_fk_grade,
+            models=models,
+            device=hw.device,
+            vllm_gpu_memory_utilization=hw.vllm_gpu_memory_utilization,
+            baseline_m0_df=base_m0,
+        )
         eval_df.to_parquet(pq, index=False)
+        if not eval_df.empty and str(eval_df.iloc[0].get("method_base", "")) == "m0a_raw":
+            m0_dfs.append(eval_df)
         typer.echo(f"Evaluated {pq} ({len(eval_df)} rows)")
 
 
@@ -195,14 +218,22 @@ def cmd_judge_agreement(
 
 
 @app.command("tomography")
-def cmd_tomography(hardware: str = _hardware_option()) -> None:
-    """Latent tomography (layer AUROC, cross-concept cosine, logit lens). NOT YET WIRED."""
-    typer.echo(
-        "`minorsafe tomography` is not implemented yet: steering/tomography.py exists but is not wired into a "
-        "pipeline that loads generators and writes tomography.json (needed for H5/H7, fig7).",
-        err=True,
+def cmd_tomography(
+    hardware: str = _hardware_option(),
+    model: list[str] = typer.Option(None, "--model", "-m", help="Specific generator alias(es) to scan."),
+    n_calib: int = typer.Option(60, "--n-calib", help="Contrastive pairs per concept."),
+    out_dir: Path = typer.Option(RESULTS_DIR / "tomography", "--out", "--out-dir"),
+) -> None:
+    """Run Latent Artificial Tomography (LAT) layer scans, cosine entanglement matrix, and Logit Lens."""
+    from minorsafe.methods.steering.tomography import run_tomography_for_profile
+
+    written = run_tomography_for_profile(
+        profile_name=hardware,
+        model_aliases=list(model) if model else None,
+        n_calib=n_calib,
+        out_dir=out_dir,
     )
-    raise typer.Exit(2)
+    typer.echo(f"Tomography complete: wrote {len(written)} report(s) under {out_dir}")
 
 
 @app.command("status")
@@ -235,9 +266,11 @@ def cmd_analyze(
     """Aggregate all run shards into cost_table.csv, 8 figures, LaTeX/MD tables, and REPORT.md."""
     summary_df = aggregate_experiment_results(runs_dir, out_dir)
     responses_df = _load_all_responses(runs_dir)
-    generate_all_figures(summary_df, out_dir / "figures")
-    generate_all_tables(summary_df, out_dir / "tables", responses_df=responses_df)
-    rep = generate_executive_report(summary_df, out_dir, responses_df=responses_df)
+    tomo_dir = out_dir / "tomography"
+    tomo_arg = tomo_dir if tomo_dir.exists() else None
+    generate_all_figures(summary_df, out_dir / "figures", tomography_dir=tomo_arg)
+    generate_all_tables(summary_df, out_dir / "tables", responses_df=responses_df, tomography_dir=tomo_arg)
+    rep = generate_executive_report(summary_df, out_dir, responses_df=responses_df, tomography_dir=tomo_arg)
     typer.echo(f"Analysis complete. Report written to {rep}")
 
 
