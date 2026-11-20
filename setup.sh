@@ -37,6 +37,15 @@ done
 DRY="${DRY_RUN:-0}"
 ENV_FILE="${REMOTE_ENV_FILE:-${REPO_ROOT}/.remote.env}"
 
+if [[ "${DRY}" != "1" ]]; then
+    LOG_DIR="${REPO_ROOT}/results/logs"
+    mkdir -p "${LOG_DIR}"
+    SETUP_LOG="${LOG_DIR}/setup_$(date +%Y%m%d_%H%M%S).log"
+    ln -sfn "${SETUP_LOG}" "${LOG_DIR}/setup_latest.log"
+    exec > >(tee -a "${SETUP_LOG}") 2>&1
+    echo "[setup] Logging setup output to ${SETUP_LOG}"
+fi
+
 echo "=== [1/4] Pre-Setup Snapshot, Git Hooks & Credential Safety ==="
 DRY_RUN="${DRY}" bash "${REPO_ROOT}/scripts/snapshot_versions.sh" "${REPO_ROOT}/results/logs" "local_pre_setup"
 if [[ "${DRY}" == "1" ]]; then

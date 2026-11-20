@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ class SmartRunLogger:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.events_path = self.log_dir / "events.jsonl"
         self.status_path = self.log_dir / "live_status.json"
+        self.error_path = self.log_dir / "last_error.txt"
 
         self._t_exp_start = time.perf_counter()
         self._total_examples_per_run = 0
@@ -239,3 +241,51 @@ class SmartRunLogger:
             progress=f"{completed_runs}/{self.total_runs} runs",
             eta_s=0.0,
         )
+
+    def fail_experiment(self, exc: BaseException, completed_runs: int = 0) -> None:
+        tb_str = traceback.format_exc()
+        if tb_str.strip() == "NoneType: None":
+            tb_str = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        elapsed = round(time.perf_counter() - self._t_exp_start, 2)
+        err_type = type(exc).__name__
+        err_msg = str(exc)
+
+        log.error(
+            "Experiment %s FAILED after %d/%d runs: %s: %s",
+            self.experiment,
+            completed_runs,
+            self.total_runs,
+            err_type,
+            err_msg,
+        )
+        self._emit_event(
+            "experiment_failed",
+            {
+                "completed_runs": int(completed_runs),
+                "elapsed_s": elapsed,
+                "error_type": err_type,
+                "error_message": err_msg,
+                "traceback": tb_str,
+                **self._current_run_meta,
+            },
+        )
+        self._write_status(
+            "failed",
+            completed_runs=int(completed_runs),
+            error_type=err_type,
+            error_message=err_msg,
+            **self._current_run_meta,
+        )
+        lines = [
+            f"timestamp: {self._now_iso()}",
+            f"experiment: {self.experiment}",
+            f"profile: {self.profile}",
+            f"completed_runs: {completed_runs}/{self.total_runs}",
+            f"current_run: {self._current_run_meta}",
+            f"error: {err_type}: {err_msg}",
+            "",
+            "traceback:",
+            tb_str.rstrip(),
+            "",
+        ]
+        self.error_path.write_text("\n".join(lines), encoding="utf-8")

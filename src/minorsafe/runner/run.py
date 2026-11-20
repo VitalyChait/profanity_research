@@ -155,115 +155,131 @@ def run_experiment(
         else contextlib.nullcontext()
     )
 
-    with lock_ctx:
-        for run_idx, rspec in enumerate(specs, start=1):
-            run_dir = exp_runs_dir / rspec.run_id
-            store = RunStore(run_dir)
-            done = store.completed_keys()
+    try:
+        with lock_ctx:
+            for run_idx, rspec in enumerate(specs, start=1):
+                run_dir = exp_runs_dir / rspec.run_id
+                store = RunStore(run_dir)
+                done = store.completed_keys()
 
-            age_band = age_bands[rspec.age_band]
-            gen_spec = models[rspec.generator_alias]
-            todo_by_seed = {s: [ex for ex in split_examples if (ex.id, s) not in done] for s in exp.seeds}
-            pending = any(todo_by_seed.values())
+                age_band = age_bands[rspec.age_band]
+                gen_spec = models[rspec.generator_alias]
+                todo_by_seed = {s: [ex for ex in split_examples if (ex.id, s) not in done] for s in exp.seeds}
+                pending = any(todo_by_seed.values())
 
-            if pending:
-                ctx = RunContext(
-                    hardware=profile,
-                    generator_spec=gen_spec,
-                    models=models,
-                    age_bands=age_bands,
-                    prompts=prompts,
-                    calib_pairs=calib_pairs,
-                    calib_examples=calib_ex,
-                    dev_examples=dev_ex,
-                    quant=rspec.quant,
-                    artifact_dir=exp_runs_dir / "_artifacts",
-                    preloaded_generator=preloaded_generator,
-                    temperature=exp.temperature,
-                    max_new_tokens=exp.max_new_tokens,
-                )
-                method = create_method(rspec.method_spec)
-                setup_rec = method.setup(ctx)
-                write_json(run_dir / "setup.json", setup_rec.to_dict())
-                smart_log.start_run(
-                    run_idx=run_idx,
-                    run_id=rspec.run_id,
-                    method=rspec.label or rspec.method_spec.name,
-                    model=gen_spec.alias,
-                    quant=rspec.quant,
-                    setup_wall_s=setup_rec.wall_s,
-                    setup_tokens=setup_rec.tokens,
-                )
+                if pending:
+                    ctx = RunContext(
+                        hardware=profile,
+                        generator_spec=gen_spec,
+                        models=models,
+                        age_bands=age_bands,
+                        prompts=prompts,
+                        calib_pairs=calib_pairs,
+                        calib_examples=calib_ex,
+                        dev_examples=dev_ex,
+                        quant=rspec.quant,
+                        artifact_dir=exp_runs_dir / "_artifacts",
+                        preloaded_generator=preloaded_generator,
+                        temperature=exp.temperature,
+                        max_new_tokens=exp.max_new_tokens,
+                    )
+                    method = create_method(rspec.method_spec)
+                    setup_rec = method.setup(ctx)
+                    write_json(run_dir / "setup.json", setup_rec.to_dict())
+                    smart_log.start_run(
+                        run_idx=run_idx,
+                        run_id=rspec.run_id,
+                        method=rspec.label or rspec.method_spec.name,
+                        model=gen_spec.alias,
+                        quant=rspec.quant,
+                        setup_wall_s=setup_rec.wall_s,
+                        setup_tokens=setup_rec.tokens,
+                    )
 
-                try:
-                    # Discarded warmup queries (plan §2.2) so CUDA/kernel initialisation is not timed.
-                    warm = split_examples[: max(0, exp.warmup_queries)]
-                    if warm:
-                        method.respond(warm, age_band=rspec.age_band, seed=exp.seeds[0] if exp.seeds else 0)
-
-                    for seed, todo in todo_by_seed.items():
-                        # Generate and checkpoint batch by batch, so a crash loses at most one batch.
-                        for i in range(0, len(todo), batch_size):
-                            chunk = todo[i : i + batch_size]
-                            if profile.device == "cuda":
-                                with GPUSampler() as gpu_s:
-                                    outputs = method.respond(chunk, age_band=rspec.age_band, seed=seed)
-                                per_item_energy = gpu_s.energy_j / max(1, len(outputs))
-                                for out in outputs:
-                                    if not math.isfinite(out.energy_j):
-                                        out.energy_j = per_item_energy
-                                    if not math.isfinite(out.peak_vram_mb):
-                                        out.peak_vram_mb = gpu_s.peak_mem_mb
-                            else:
-                                outputs = method.respond(chunk, age_band=rspec.age_band, seed=seed)
-
-                            rows = [
-                                _output_to_row(out, rspec, gen_spec, seed, ex)
-                                for ex, out in zip(chunk, outputs, strict=True)
-                            ]
-                            store.append_responses(rows)
-
-                            finite_vram = [o.peak_vram_mb for o in outputs if math.isfinite(o.peak_vram_mb)]
-                            finite_energy = [o.energy_j for o in outputs if math.isfinite(o.energy_j)]
-                            smart_log.log_batch(
-                                run_idx=run_idx,
-                                run_id=rspec.run_id,
-                                seed=seed,
-                                batch_done=min(len(todo), i + len(chunk)),
-                                total_todo=len(todo),
-                                batch_e2e_ms=float(np.mean([o.e2e_ms for o in outputs])) if outputs else 0.0,
-                                decode_tok_per_s=float(np.mean([o.decode_tok_per_s for o in outputs]))
-                                if outputs
-                                else 0.0,
-                                peak_vram_mb=max(finite_vram) if finite_vram else float("nan"),
-                                energy_j=sum(finite_energy) if finite_energy else float("nan"),
+                    try:
+                        # Discarded warmup queries (plan §2.2) so CUDA/kernel initialisation is not timed.
+                        warm = split_examples[: max(0, exp.warmup_queries)]
+                        if warm:
+                            method.respond(
+                                warm, age_band=rspec.age_band, seed=exp.seeds[0] if exp.seeds else 0
                             )
-                finally:
-                    method.teardown()
-            else:
-                setup_data = read_json(run_dir / "setup.json") if (run_dir / "setup.json").exists() else {}
-                smart_log.start_run(
-                    run_idx=run_idx,
-                    run_id=rspec.run_id,
-                    method=rspec.label or rspec.method_spec.name,
-                    model=gen_spec.alias,
-                    quant=rspec.quant,
-                    setup_wall_s=float(setup_data.get("total_wall_s", 0.0)),
-                    setup_tokens=int(setup_data.get("total_tokens", 0)),
-                )
 
-            df = store.load_responses()
-            if exp.evaluate and not df.empty and (pending or "success" not in df.columns):
-                df = evaluate_responses_df(
-                    df,
-                    eval_settings=profile.eval,
-                    target_fk_grade=age_band.target_fk_grade,
-                )
-                df.to_parquet(store.responses_path, index=False)
+                        for seed, todo in todo_by_seed.items():
+                            # Generate and checkpoint batch by batch, so a crash loses at most one batch.
+                            for i in range(0, len(todo), batch_size):
+                                chunk = todo[i : i + batch_size]
+                                if profile.device == "cuda":
+                                    with GPUSampler() as gpu_s:
+                                        outputs = method.respond(chunk, age_band=rspec.age_band, seed=seed)
+                                    per_item_energy = gpu_s.energy_j / max(1, len(outputs))
+                                    for out in outputs:
+                                        if not math.isfinite(out.energy_j):
+                                            out.energy_j = per_item_energy
+                                        if not math.isfinite(out.peak_vram_mb):
+                                            out.peak_vram_mb = gpu_s.peak_mem_mb
+                                else:
+                                    outputs = method.respond(chunk, age_band=rspec.age_band, seed=seed)
 
-            succ_mean = float(df["success"].mean()) if (not df.empty and "success" in df.columns) else None
-            smart_log.finish_run(run_idx=run_idx, run_id=rspec.run_id, n_rows=len(df), success_mean=succ_mean)
-            completed_dirs.append(run_dir)
+                                rows = [
+                                    _output_to_row(out, rspec, gen_spec, seed, ex)
+                                    for ex, out in zip(chunk, outputs, strict=True)
+                                ]
+                                store.append_responses(rows)
+
+                                finite_vram = [
+                                    o.peak_vram_mb for o in outputs if math.isfinite(o.peak_vram_mb)
+                                ]
+                                finite_energy = [o.energy_j for o in outputs if math.isfinite(o.energy_j)]
+                                smart_log.log_batch(
+                                    run_idx=run_idx,
+                                    run_id=rspec.run_id,
+                                    seed=seed,
+                                    batch_done=min(len(todo), i + len(chunk)),
+                                    total_todo=len(todo),
+                                    batch_e2e_ms=float(np.mean([o.e2e_ms for o in outputs]))
+                                    if outputs
+                                    else 0.0,
+                                    decode_tok_per_s=float(np.mean([o.decode_tok_per_s for o in outputs]))
+                                    if outputs
+                                    else 0.0,
+                                    peak_vram_mb=max(finite_vram) if finite_vram else float("nan"),
+                                    energy_j=sum(finite_energy) if finite_energy else float("nan"),
+                                )
+                    finally:
+                        method.teardown()
+                else:
+                    setup_data = (
+                        read_json(run_dir / "setup.json") if (run_dir / "setup.json").exists() else {}
+                    )
+                    smart_log.start_run(
+                        run_idx=run_idx,
+                        run_id=rspec.run_id,
+                        method=rspec.label or rspec.method_spec.name,
+                        model=gen_spec.alias,
+                        quant=rspec.quant,
+                        setup_wall_s=float(setup_data.get("total_wall_s", 0.0)),
+                        setup_tokens=int(setup_data.get("total_tokens", 0)),
+                    )
+
+                df = store.load_responses()
+                if exp.evaluate and not df.empty and (pending or "success" not in df.columns):
+                    df = evaluate_responses_df(
+                        df,
+                        eval_settings=profile.eval,
+                        target_fk_grade=age_band.target_fk_grade,
+                    )
+                    df.to_parquet(store.responses_path, index=False)
+
+                succ_mean = (
+                    float(df["success"].mean()) if (not df.empty and "success" in df.columns) else None
+                )
+                smart_log.finish_run(
+                    run_idx=run_idx, run_id=rspec.run_id, n_rows=len(df), success_mean=succ_mean
+                )
+                completed_dirs.append(run_dir)
+    except BaseException as exc:
+        smart_log.fail_experiment(exc, completed_runs=len(completed_dirs))
+        raise
 
     smart_log.finish_experiment(len(completed_dirs))
     return completed_dirs

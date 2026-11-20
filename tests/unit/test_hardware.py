@@ -259,3 +259,37 @@ def test_smart_run_logger_writes_events_and_live_status(tmp_path: Path):
     live = json.loads((tmp_path / "live_status.json").read_text(encoding="utf-8"))
     assert live["state"] == "completed"
     assert live["experiment"] == "unit_exp"
+
+
+def test_smart_run_logger_records_failure_and_traceback(tmp_path: Path):
+    slogger = SmartRunLogger(experiment="unit_fail", profile="cpu_debug", total_runs=2, log_dir=tmp_path)
+    slogger.start_experiment(total_examples_per_run=4, seeds=[0])
+    slogger.start_run(
+        run_idx=1,
+        run_id="m0a__tiny__fp32__abc",
+        method="m0a_raw",
+        model="tiny_llama",
+        quant="fp32",
+        setup_wall_s=0.1,
+        setup_tokens=0,
+    )
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError as exc:
+        slogger.fail_experiment(exc, completed_runs=1)
+
+    events = [json.loads(ln) for ln in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["event"] == "experiment_failed"
+    assert events[-1]["error_type"] == "RuntimeError"
+    assert events[-1]["error_message"] == "boom"
+    assert events[-1]["completed_runs"] == 1
+    assert "RuntimeError: boom" in events[-1]["traceback"]
+
+    live = json.loads((tmp_path / "live_status.json").read_text(encoding="utf-8"))
+    assert live["state"] == "failed"
+    assert live["error_type"] == "RuntimeError"
+    assert live["error_message"] == "boom"
+
+    last_err = tmp_path / "last_error.txt"
+    assert last_err.exists()
+    assert "RuntimeError: boom" in last_err.read_text(encoding="utf-8")

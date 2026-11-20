@@ -201,6 +201,16 @@ run_rsync_push() {
     "${cmd[@]}"
 }
 
+pull_remote_logs() {
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        return 0
+    fi
+    mkdir -p "${REPO_ROOT}/results/logs"
+    "${AUTH_PREFIX[@]}" rsync -az -e "${RSYNC_SSH}" \
+        "${REMOTE_TARGET}:${REMOTE_DIR}/results/logs/" \
+        "${REPO_ROOT}/results/logs/" >/dev/null 2>&1 || true
+}
+
 # Build safe remote env exports (without printing secrets in DRY_RUN)
 remote_env_prefix() {
     local parts="export PYTHONNOUSERSITE=1 UV_NO_MODIFY_PATH=1 TOKENIZERS_PARALLELISM=false"
@@ -321,7 +331,15 @@ EOF
     setup)
         run_rsync_push
         ENV_PRE="$(remote_env_prefix)"
+        set +e
         run_ssh "${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/setup_server.sh && .venv/bin/python -m minorsafe.cli preflight --hardware '${REMOTE_PROFILE}'$( [[ "${REQUIRE_EXCLUSIVE}" == "0" ]] && echo ' --allow-busy' || true )"
+        RC=$?
+        set -e
+        if [[ "${RC}" -ne 0 ]]; then
+            echo "[remote] Remote command exited with status ${RC}; auto-pulling remote results/logs/ to ${REPO_ROOT}/results/logs/ ..." >&2
+            pull_remote_logs
+            exit "${RC}"
+        fi
         ;;
 
     preflight)
@@ -369,7 +387,15 @@ EOF
 )"
             run_ssh "${DETACH_SCRIPT}"
         else
+            set +e
             run_ssh "${RUN_CMD}"
+            RC=$?
+            set -e
+            if [[ "${RC}" -ne 0 ]]; then
+                echo "[remote] Remote command exited with status ${RC}; auto-pulling remote results/logs/ to ${REPO_ROOT}/results/logs/ ..." >&2
+                pull_remote_logs
+                exit "${RC}"
+            fi
         fi
         ;;
 
