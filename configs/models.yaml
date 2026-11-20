@@ -334,12 +334,14 @@ xlmr_large_mlm:
 # 4. Teacher & Cross-Family LLM Judge Models
 # ===========================================================================
 mistral_small_24b_awq:
-  hf_id: SolidRust/Mistral-Small-24B-Instruct-2501-AWQ
+  hf_id: casperhansen/mistral-small-24b-instruct-2501-awq
   arch: decoder
   role: judge
   family: mistral
   size_group: L
   params_b: 24.0
+  quant_ids:
+    awq: casperhansen/mistral-small-24b-instruct-2501-awq
   notes: "Cross-family judge outside {Qwen, DeepSeek, Gemma, Llama} to avoid self-preference bias."
 
 gemma2_27b_it:
@@ -353,10 +355,12 @@ gemma2_27b_it:
   supports_system: false
 
 llama33_70b_awq:
-  hf_id: hugging-quants/Meta-Llama-3.3-70B-Instruct-AWQ-INT4
+  hf_id: casperhansen/llama-3.3-70b-instruct-awq
   arch: decoder
   role: teacher
   family: llama
   size_group: L
   params_b: 70.6
-  gated: true
+  gated: false
+  quant_ids:
+    awq: casperhansen/llama-3.3-70b-instruct-awq

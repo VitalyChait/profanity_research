@@ -77,9 +77,11 @@ def _vram_mb() -> float:
 
 def checkpoint_id(spec: ModelSpec, quant: str) -> str:
     if quant in ("awq", "gptq"):
-        if quant not in spec.quant_ids:
-            raise ValueError(f"{spec.alias}: no pre-quantized {quant} checkpoint configured (quant_ids)")
-        return spec.quant_ids[quant]
+        if quant in spec.quant_ids:
+            return spec.quant_ids[quant]
+        if quant in spec.hf_id.lower():
+            return spec.hf_id
+        raise ValueError(f"{spec.alias}: no pre-quantized {quant} checkpoint configured (quant_ids)")
     return spec.hf_id
 
 

@@ -523,3 +523,30 @@ def test_h5_and_h7_tomography_hypotheses(tmp_path: Path):
     bad_df.loc[bad_df["method_base"] == "m3_steer_ortho", "slang_fpr"] = 0.40
     v_bad = {v["hypothesis"]: v for v in evaluate_hypotheses(bad_df, tomography_dir=tomo_dir)}
     assert v_bad["H5"]["status"] == NOT_SUPPORTED
+
+
+def test_checkpoint_id_handles_primary_awq_specs():
+    from minorsafe.config import load_models
+    from minorsafe.registry import checkpoint_id
+
+    reg = load_models()
+    assert checkpoint_id(reg["llama33_70b_awq"], "awq") == "casperhansen/llama-3.3-70b-instruct-awq"
+    assert (
+        checkpoint_id(reg["mistral_small_24b_awq"], "awq")
+        == "casperhansen/mistral-small-24b-instruct-2501-awq"
+    )
+
+    awq_no_qids = ModelSpec(
+        alias="custom_awq",
+        hf_id="org/model-AWQ",
+        arch="decoder",
+        role="teacher",
+        family="llama",
+    )
+    assert checkpoint_id(awq_no_qids, "awq") == "org/model-AWQ"
+
+    bf16_only = ModelSpec(
+        alias="bf16_only", hf_id="org/model-it", arch="decoder", role="teacher", family="gemma"
+    )
+    with pytest.raises(ValueError, match="no pre-quantized awq checkpoint"):
+        checkpoint_id(bf16_only, "awq")
