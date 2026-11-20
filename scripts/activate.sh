@@ -25,8 +25,9 @@ if [ -f "${_MS_REPO_ROOT}/.remote.env" ]; then
 fi
 
 _MS_PROFILE="${_MS_PROFILE:-${REMOTE_PROFILE:-auto}}"
-export TOKENIZERS_PARALLELISM="false"
-export HF_HOME="${HF_HOME:-${_MS_REPO_ROOT}/.cache/huggingface}"
+# Sandbox Python/uv/HF caches inside the repo directory (no user-site or system overrides).
+# shellcheck disable=SC1091
+source "${_MS_REPO_ROOT}/scripts/env_sandbox.sh"
 
 if [ -x "${_MS_REPO_ROOT}/scripts/install_git_hooks.sh" ]; then
     bash "${_MS_REPO_ROOT}/scripts/install_git_hooks.sh" >/dev/null 2>&1 || true

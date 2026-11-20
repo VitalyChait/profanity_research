@@ -7,24 +7,22 @@ cd "${REPO_ROOT}"
 
 echo "[setup_server] Bootstrapping environment in ${REPO_ROOT}..."
 
-# Include ~/.local/bin before checking so previously installed uv is found in non-login SSH shells.
-export PATH="${HOME}/.local/bin:${PATH}"
+# Keep uv, Python, caches, and .venv strictly inside REPO_ROOT without touching system or ~/.bashrc.
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/env_sandbox.sh"
 
 # Capture a snapshot of pre-existing OS/CUDA/driver/venv versions before modifying anything.
 bash "${REPO_ROOT}/scripts/snapshot_versions.sh" "${REPO_ROOT}/results/logs" "remote_pre_setup"
 
 if ! command -v uv >/dev/null 2>&1; then
-    echo "[setup_server] Installing uv..."
+    echo "[setup_server] Installing uv into ${UV_INSTALL_DIR}..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="${HOME}/.local/bin:${PATH}"
 fi
 
 # Install the locked environment with CUDA torch, bitsandbytes, and vLLM (plan §0.1 / Phase 10).
 # --reinstall-package minorsafe guarantees the local wheel includes all subpackages (e.g. minorsafe.data).
 uv sync --python 3.11 --reinstall-package minorsafe --extra gpu --extra vllm --extra dev
 
-export HF_HOME="${HF_HOME:-${REPO_ROOT}/.cache/huggingface}"
-export TOKENIZERS_PARALLELISM="false"
 mkdir -p "${HF_HOME}" data/raw data/processed results/runs results/figures results/tables results/logs
 
 if [ -z "${HF_TOKEN:-}" ]; then

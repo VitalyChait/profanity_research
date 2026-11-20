@@ -172,6 +172,8 @@ run_rsync_push() {
         -e "${RSYNC_SSH}"
         --exclude=/.git/
         --exclude=/.venv/
+        --exclude=/.uv/
+        --exclude=/.cache/
         --exclude=.remote.env
         --exclude='.remote.env.*'
         --exclude=.secrets/
@@ -201,7 +203,7 @@ run_rsync_push() {
 
 # Build safe remote env exports (without printing secrets in DRY_RUN)
 remote_env_prefix() {
-    local parts="export TOKENIZERS_PARALLELISM=false"
+    local parts="export PYTHONNOUSERSITE=1 UV_NO_MODIFY_PATH=1 TOKENIZERS_PARALLELISM=false"
     if [[ -n "${HF_HOME:-}" ]]; then
         parts+=" HF_HOME=$(printf '%q' "${HF_HOME}")"
     fi

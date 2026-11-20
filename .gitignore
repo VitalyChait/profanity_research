@@ -223,6 +223,8 @@ __marimo__/
 /data/
 /results/
 /models_cache/
+/.uv/
+/.cache/
 *.safetensors
 *.pt
 

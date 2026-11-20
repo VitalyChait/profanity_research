@@ -52,6 +52,10 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
     exit 0
 fi
 
+# Sandbox Python/uv/HF/Triton/cache paths inside REPO_ROOT after DRY_RUN check.
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/env_sandbox.sh"
+
 LOG_DIR="${REPO_ROOT}/results/logs"
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/${PHASE}_$(date +%Y%m%d_%H%M%S).log"

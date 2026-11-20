@@ -18,6 +18,7 @@ def test_shell_scripts_syntax_valid():
     scripts = [
         REPO_ROOT / "setup.sh",
         REPO_ROOT / "scripts" / "setup_server.sh",
+        REPO_ROOT / "scripts" / "env_sandbox.sh",
         REPO_ROOT / "scripts" / "snapshot_versions.sh",
         REPO_ROOT / "scripts" / "run_phase.sh",
         REPO_ROOT / "scripts" / "activate.sh",
