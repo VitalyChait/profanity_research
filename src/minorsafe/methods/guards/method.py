@@ -22,6 +22,33 @@ from minorsafe.telemetry.tokens import TokenUsage
 
 _ZEROSHOT_ENCODER_ALIASES = {"toxic_bert", "roberta_tox"}
 
+GUARD_ACTIONS = ("fallback", "regenerate", "llm_rewrite", "mlm_substitute")
+GUARD_PLACEMENTS = ("input", "output", "both", "auto")
+
+
+def resolve_guard_placement(placement: str, action: str) -> str:
+    """Return the effective guard placement for ``action``.
+
+    An input-side hit always short-circuits to the canned fallback (no draft is generated), so an
+    input-blocking placement paired with ``regenerate`` / ``llm_rewrite`` / ``mlm_substitute`` silently
+    turns every flagged prompt into a fallback refusal and the configured action never runs.
+    ``auto`` therefore resolves to ``both`` for ``fallback`` (block early, check the draft too) and to
+    ``output`` for remediation actions (moderate the draft); the contradictory explicit combination is
+    rejected.
+    """
+    if action not in GUARD_ACTIONS:
+        raise ValueError(f"Unknown guard action {action!r}; expected one of {GUARD_ACTIONS}")
+    if placement not in GUARD_PLACEMENTS:
+        raise ValueError(f"Unknown guard placement {placement!r}; expected one of {GUARD_PLACEMENTS}")
+    if placement == "auto":
+        return "both" if action == "fallback" else "output"
+    if placement in ("input", "both") and action != "fallback":
+        raise ValueError(
+            f"Guard placement {placement!r} blocks flagged prompts with the fallback response, so "
+            f"action {action!r} would never run on them. Use placement 'output' (or 'auto')."
+        )
+    return placement
+
 
 def _resolve_guard_spec(ctx: RunContext, guard_arch: str, train_mode: str, requested: str) -> ModelSpec:
     models = ctx.models
@@ -70,8 +97,8 @@ class GuardResponseMethod(ResponseMethod):
         self.train_mode: str = str(spec.params.get("train_mode", "finetuned"))
         self.guard_model_alias: str = str(spec.params.get("guard_model", "auto"))
         self.mlm_model_alias: str = str(spec.params.get("mlm_model", "auto"))
-        self.placement: str = str(spec.params.get("placement", "both"))
         self.action: str = str(spec.params.get("action", "mlm_substitute"))
+        self.placement: str = resolve_guard_placement(str(spec.params.get("placement", "auto")), self.action)
         self.max_regenerations: int = int(spec.params.get("max_regenerations", 2))
         self.threshold: float = 0.50
 
@@ -273,6 +300,7 @@ class GuardResponseMethod(ResponseMethod):
                             "output_guard_score": float("nan"),
                             "guard_threshold": self.threshold,
                             "guard_ms": guard_ms_arr[idx],
+                            "guard_placement": self.placement,
                         },
                     )
                 else:
@@ -353,6 +381,7 @@ class GuardResponseMethod(ResponseMethod):
                     "output_guard_score": out_score,
                     "guard_threshold": self.threshold,
                     "guard_ms": guard_ms_arr[idx],
+                    "guard_placement": self.placement,
                 }
                 if self.post_filter:
                     extra["post_filter_replacements"] = n_filtered

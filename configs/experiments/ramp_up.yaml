@@ -10,6 +10,8 @@ capability_eval: false
 runs:
   - method: m1_encoder_guard
     generators: ["M", "L"]
+    params:
+      action: fallback        # pure guard (placement both): guard_macro_f1 stays a prompt-detection metric
     sweep:
       n_calib: [25, 50, 100, 500, 2000]
   - method: m2_lora

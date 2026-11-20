@@ -597,6 +597,49 @@ def _h10(df: pd.DataFrame) -> Verdict:
     )
 
 
+def load_tomography_summary(tomography_dir: Path | None) -> list[dict[str, Any]] | None:
+    """Return per-model tomography summary entries, or None when no tomography output exists.
+
+    Accepts ``summary.json`` as written by ``run_tomography_for_profile``
+    (``{"profile": ..., "models": [...]}``) or as a bare list. When ``summary.json`` is absent
+    (the run died before the final write), the entries are rebuilt from the per-model reports.
+    """
+    if tomography_dir is None:
+        return None
+    tomo_dir = Path(tomography_dir)
+    summary_path = tomo_dir / "summary.json"
+    if summary_path.exists():
+        loaded = read_json(summary_path)
+        if isinstance(loaded, dict):
+            loaded = loaded.get("models")
+        if isinstance(loaded, list):
+            entries = [e for e in loaded if isinstance(e, dict)]
+            return entries or None
+        return None
+
+    entries: list[dict[str, Any]] = []
+    for path in sorted(tomo_dir.glob("*.json")) if tomo_dir.is_dir() else []:
+        try:
+            report = read_json(path)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(report, dict) or "model" not in report:
+            continue
+        summary = report.get("summary")
+        if not isinstance(summary, dict):
+            continue
+        entries.append(
+            {
+                "model": report["model"],
+                "family": report.get("family"),
+                "size_group": report.get("size_group") or "S",
+                "params_b": report.get("params_b"),
+                **summary,
+            }
+        )
+    return entries or None
+
+
 def evaluate_hypotheses(
     summary_df: pd.DataFrame,
     responses_df: pd.DataFrame | None = None,
@@ -609,13 +652,7 @@ def evaluate_hypotheses(
             asdict(Verdict(h, STATEMENTS[h], "", NOT_EVALUATED, 0, "No aggregated results."))
             for h in STATEMENTS
         ]
-    tomo_summary: list[dict[str, Any]] | None = None
-    if tomography_dir is not None:
-        summary_path = Path(tomography_dir) / "summary.json"
-        if summary_path.exists():
-            loaded = read_json(summary_path)
-            if isinstance(loaded, list):
-                tomo_summary = loaded
+    tomo_summary = load_tomography_summary(tomography_dir)
     verdicts = [
         _h1(df),
         _h2(df, responses_df),
@@ -631,4 +668,11 @@ def evaluate_hypotheses(
     return [asdict(v) for v in verdicts]
 
 
-__all__ = ["MIXED", "NOT_EVALUATED", "NOT_SUPPORTED", "SUPPORTED", "evaluate_hypotheses"]
+__all__ = [
+    "MIXED",
+    "NOT_EVALUATED",
+    "NOT_SUPPORTED",
+    "SUPPORTED",
+    "evaluate_hypotheses",
+    "load_tomography_summary",
+]

@@ -3,7 +3,8 @@ kind: guard
 params:
   guard_arch: decoder
   guard_model: auto
-  placement: both           # input | output | both
+  placement: auto           # input | output | both | auto (auto = both for fallback, output for
+                            # remediation actions; input/both + a non-fallback action is rejected)
   action: llm_rewrite       # fallback | regenerate | llm_rewrite | mlm_substitute
   mlm_model: auto
   max_regenerations: 2

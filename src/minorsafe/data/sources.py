@@ -54,7 +54,7 @@ _SEED_EXAMPLES: list[tuple[str, bool, list[str], str]] = [
     (
         "Why is my internet lagging like sh1t right before the tournament f*ck 🖕?",
         False,
-        ["profanity", "obfuscated"],
+        ["obfuscated", "profanity"],
         "Lag right before a match is frustrating—try switching from Wi-Fi to an Ethernet cable and closing background downloads.",
     ),
     (
@@ -200,22 +200,50 @@ def load_beavertails(spec: SourceSpec, offline: bool = False) -> list[Example]:
     except Exception as exc:
         log.warning("Skipping %s (%s): %s", spec.name, spec.hf_id, exc)
         return []
-    out = []
+    return _beavertails_prompt_examples(rows, source=spec.name)
+
+
+def _beavertails_prompt_examples(rows: list[dict], source: str) -> list[Example]:
+    """Turn BeaverTails QA rows into one prompt-level Example per unique prompt.
+
+    BeaverTails' ``is_safe`` labels the *QA pair* (was the sampled response harmless?), not the prompt:
+    a harmful red-team prompt that drew a refusal is ``is_safe=True``. So:
+    - a prompt is ``label_unsafe=True`` when at least one of its responses was judged unsafe;
+    - prompts whose responses were all safe have no reliable prompt label (they mix harmless questions
+      with refused harmful requests) and are skipped rather than labelled benign;
+    - ``response`` / ``response_unsafe`` keep the original pair-level annotation of one unsafe response.
+    """
+    by_prompt: dict[str, list[dict]] = {}
     for r in rows:
         prompt = str(r.get("prompt") or "").strip()
-        if not prompt:
+        if prompt:
+            by_prompt.setdefault(prompt, []).append(r)
+
+    out: list[Example] = []
+    n_unlabelled = 0
+    for prompt, prompt_rows in by_prompt.items():
+        unsafe_rows = [r for r in prompt_rows if not bool(r.get("is_safe", True))]
+        if not unsafe_rows:
+            n_unlabelled += 1
             continue
-        is_safe = bool(r.get("is_safe", True))
         out.append(
             Example(
-                source=spec.name,
+                source=source,
                 turns=[Turn(role="user", content=prompt)],
-                label_unsafe=not is_safe,
-                response=r.get("response"),
-                response_unsafe=not is_safe,
-                categories=["benign"] if is_safe else ["unsafe_other"],
+                label_unsafe=True,
+                response=unsafe_rows[0].get("response"),
+                response_unsafe=True,
+                categories=["unsafe_other"],
                 age_band="teen_12_18",
+                meta={"n_responses": len(prompt_rows), "n_unsafe_responses": len(unsafe_rows)},
             )
+        )
+    if n_unlabelled:
+        log.info(
+            "%s: skipped %d/%d prompts whose responses were all safe (no prompt-level label)",
+            source,
+            n_unlabelled,
+            len(by_prompt),
         )
     return out
 

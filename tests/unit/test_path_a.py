@@ -525,6 +525,80 @@ def test_h5_and_h7_tomography_hypotheses(tmp_path: Path):
     assert v_bad["H5"]["status"] == NOT_SUPPORTED
 
 
+def _h5_h7_summary_df(models_by_sg: dict[str, str]) -> pd.DataFrame:
+    rows = []
+    for method_base, fpr in (("m3_steer_ortho", 0.05), ("m3_steer_sttp", 0.22), ("m0b_sysprompt", 0.30)):
+        rows.append(
+            {
+                "experiment": "subculture_audit",
+                "method": method_base,
+                "method_base": method_base,
+                "method_params": "{}",
+                "model": models_by_sg["S"],
+                "quant": "bf16",
+                "slang_fpr": fpr,
+            }
+        )
+    for sg, dppl in (("S", 18.0), ("M", 5.0)):
+        rows.append(
+            {
+                "experiment": "main_grid",
+                "method": "m3_steer_sttp",
+                "method_base": "m3_steer_sttp",
+                "method_params": "{}",
+                "model": models_by_sg[sg],
+                "size_group": sg,
+                "quant": "bf16",
+                "ppl_delta_pct_mean": dppl,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def test_real_tomography_writer_output_feeds_h5_and_h7(
+    tmp_path: Path, monkeypatch, dummy_lm, dummy_tokenizer, sample_pairs
+):
+    """Round-trip the production `summary.json` writer into the hypothesis reader."""
+    from minorsafe.data.schema import save_pairs
+    from minorsafe.methods.steering import tomography as tomo_mod
+
+    monkeypatch.setattr(tomo_mod, "load_decoder", lambda *a, **k: (dummy_lm, dummy_tokenizer, None))
+    monkeypatch.setattr(tomo_mod, "free_model", lambda *a, **k: None)
+    data_dir = tmp_path / "data"
+    save_pairs(sample_pairs, data_dir / "processed" / "pairs.parquet")
+    tomo_dir = tmp_path / "tomography"
+    tomo_mod.run_tomography_for_profile(
+        profile_name="cpu_debug",
+        model_aliases=["qwen25_05b", "qwen25_15b"],
+        n_calib=8,
+        concepts=["profanity", "lexical_complexity", "slang_toxic", "slang_benign"],
+        out_dir=tomo_dir,
+        data_dir=data_dir,
+    )
+
+    from minorsafe.analysis.hypotheses import load_tomography_summary
+    from minorsafe.utils import read_json
+
+    assert isinstance(read_json(tomo_dir / "summary.json"), dict)  # the production schema
+    entries = load_tomography_summary(tomo_dir)
+    assert entries is not None and [e["model"] for e in entries] == ["qwen25_05b", "qwen25_15b"]
+
+    summary_df = _h5_h7_summary_df({"S": "qwen25_05b", "M": "qwen25_15b"})
+    verdicts = {v["hypothesis"]: v for v in evaluate_hypotheses(summary_df, tomography_dir=tomo_dir)}
+    assert verdicts["H5"]["status"] != NOT_EVALUATED, verdicts["H5"]["evidence"]
+    assert verdicts["H7"]["status"] != NOT_EVALUATED, verdicts["H7"]["evidence"]
+
+    # A run that died before the final summary write still leaves per-model reports to read.
+    (tomo_dir / "summary.json").unlink()
+    rebuilt = load_tomography_summary(tomo_dir)
+    assert rebuilt is not None
+    assert [(e["model"], e["size_group"]) for e in rebuilt] == [("qwen25_05b", "S"), ("qwen25_15b", "M")]
+    assert all("mean_mid_profanity_slang_benign_cos" in e and "mean_mid_auroc" in e for e in rebuilt)
+    verdicts = {v["hypothesis"]: v for v in evaluate_hypotheses(summary_df, tomography_dir=tomo_dir)}
+    assert verdicts["H5"]["status"] != NOT_EVALUATED
+    assert verdicts["H7"]["status"] != NOT_EVALUATED
+
+
 def test_checkpoint_id_handles_primary_awq_specs():
     from minorsafe.config import load_models
     from minorsafe.registry import checkpoint_id

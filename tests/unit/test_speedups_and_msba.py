@@ -240,3 +240,111 @@ def test_gpu_gb10_and_pilot_configs_preserve_h1_to_h10_design():
         "m3_steer_ortho",
         "m3_probe_guard",
     }
+
+
+def test_resolve_guard_placement_rules():
+    from minorsafe.methods.guards.method import resolve_guard_placement
+
+    assert resolve_guard_placement("auto", "fallback") == "both"
+    for action in ("regenerate", "llm_rewrite", "mlm_substitute"):
+        assert resolve_guard_placement("auto", action) == "output"
+        assert resolve_guard_placement("output", action) == "output"
+        for blocking in ("input", "both"):
+            with pytest.raises(ValueError, match="never run"):
+                resolve_guard_placement(blocking, action)
+    assert resolve_guard_placement("input", "fallback") == "input"
+    with pytest.raises(ValueError):
+        resolve_guard_placement("sideways", "fallback")
+    with pytest.raises(ValueError):
+        resolve_guard_placement("auto", "shout")
+
+
+def test_every_configured_guard_arm_runs_its_action():
+    """No experiment may pair a remediation action with input-side blocking (H4 / action sweeps)."""
+    import itertools
+
+    from minorsafe.config import CONFIG_DIR, load_method
+    from minorsafe.methods.guards.method import GuardResponseMethod
+
+    checked = 0
+    for path in sorted((CONFIG_DIR / "experiments").glob("*.yaml")):
+        exp = load_experiment(path.stem)
+        for group in exp.runs:
+            if group.method not in ("m1_encoder_guard", "m1_decoder_guard"):
+                continue
+            base = load_method(group.method)
+            keys = list(group.sweep)
+            for combo in itertools.product(*(group.sweep[k] for k in keys)) if keys else [()]:
+                params = {**base.params, **group.params, **dict(zip(keys, combo, strict=True))}
+                method = GuardResponseMethod(MethodSpec(name=base.name, kind=base.kind, params=params))
+                expected = "both" if method.action == "fallback" else "output"
+                assert method.placement == expected, (path.stem, group.label, params)
+                checked += 1
+    assert checked >= 20
+
+
+def _profane_examples() -> list[Example]:
+    return [
+        Example(
+            id=f"prof_{i}",
+            source="unit",
+            split="dev",
+            turns=[Turn(role="user", content=f"This fucking homework {i} is bullshit, explain fractions?")],
+            categories=["profanity"],
+            label_unsafe=False,
+            age_band="teen_12_18",
+        )
+        for i in range(3)
+    ]
+
+
+def test_remediation_action_runs_on_flagged_profane_prompts(
+    dummy_lm, dummy_tokenizer, dummy_model_spec, sample_pairs, tmp_path, monkeypatch
+):
+    batch = _profane_examples()
+    ctx = _ctx(dummy_lm, dummy_tokenizer, dummy_model_spec, batch, sample_pairs, tmp_path)
+
+    def _always_flag(prompts, responses=None):
+        return [(0.95, 4, 0) for _ in prompts], True, 1.0
+
+    # Remediation arm (recomposition config): drafts are generated and recomposed, never short-circuited.
+    mlm = create_method(
+        MethodSpec(
+            name="m1_encoder_guard",
+            kind="guard",
+            params={"guard_arch": "encoder", "train_mode": "zeroshot", "action": "mlm_substitute"},
+        )
+    )
+    mlm.setup(ctx)
+    mlm.threshold = 0.5
+    monkeypatch.setattr(mlm, "_score_batch_prompts_or_texts", _always_flag)
+    gen_calls: list[int] = []
+    orig_gen = mlm.generator.generate
+    monkeypatch.setattr(
+        mlm.generator, "generate", lambda msgs, **kw: gen_calls.append(len(msgs)) or orig_gen(msgs, **kw)
+    )
+    outs = mlm.respond(batch, seed=0)
+    assert gen_calls == [3]
+    assert [o.action_taken for o in outs] == ["mlm_substitute"] * 3
+    assert not any(o.blocked for o in outs)
+    assert {o.extra["guard_placement"] for o in outs} == {"output"}
+    mlm.teardown()
+
+    # Fallback arm keeps early input blocking: no draft is generated for flagged prompts.
+    fb = create_method(
+        MethodSpec(
+            name="m1_encoder_guard",
+            kind="guard",
+            params={"guard_arch": "encoder", "train_mode": "zeroshot", "action": "fallback"},
+        )
+    )
+    fb.setup(ctx)
+    fb.threshold = 0.5
+    monkeypatch.setattr(fb, "_score_batch_prompts_or_texts", _always_flag)
+    fb_calls: list[int] = []
+    monkeypatch.setattr(fb.generator, "generate", lambda msgs, **kw: fb_calls.append(len(msgs)) or [])
+    outs = fb.respond(batch, seed=0)
+    assert fb_calls == []
+    assert all(o.blocked and o.action_taken == "fallback" for o in outs)
+    assert {o.extra["guard_placement"] for o in outs} == {"both"}
+    fb.teardown()

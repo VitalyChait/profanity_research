@@ -42,7 +42,7 @@ def write_data_card(
         "## 1. Summary",
         f"- **Total Evaluation Examples**: {len(examples)}",
         f"- **Total Contrastive Pairs**: {len(pairs)}",
-        f"- **Cross-Split Normalized Leakage**: {check_split_leakage(examples)} (Examples), {check_split_leakage(pairs)} (Pairs)",
+        f"- **Cross-Split Leakage (exact text or prompt family incl. obfuscated variants)**: {check_split_leakage(examples)} (Examples), {check_split_leakage(pairs)} (Pairs)",
         "- **Unicode & Emoji Policy**: Strict `NFC` normalization; all emojis (`💀`, `😭`, `🔥`, `🖕`) and special characters preserved.",
         "",
         "## 2. Examples by Split",

@@ -7,7 +7,8 @@ params:
   n_calib: 200
   epochs: 2
   lr: 3.0e-5
-  placement: both           # input | output | both
+  placement: auto           # input | output | both | auto (auto = both for fallback, output for
+                            # remediation actions; input/both + a non-fallback action is rejected)
   action: mlm_substitute    # fallback | regenerate | llm_rewrite | mlm_substitute
   mlm_model: auto
   max_regenerations: 2

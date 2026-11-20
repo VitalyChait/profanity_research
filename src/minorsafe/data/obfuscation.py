@@ -140,10 +140,29 @@ def detect_obfuscated_profanity(text: str) -> list[str]:
     return unique
 
 
+# Parent tags that contradict an obfuscated-profanity variant (which is always labelled unsafe).
+_SAFE_ONLY_CATEGORIES = frozenset({"benign", "benign_tricky"})
+
+
+def _obfuscated_categories(parent_categories: list[str]) -> list[str]:
+    """Categories for an obfuscated variant: ``obfuscated`` first, safe-only parent tags dropped.
+
+    The runner, stratified sampler and aggregation key on ``categories[0]``, so ``obfuscated`` must be
+    the primary category or the variant is analysed as its parent's category (H6 subset stays empty and
+    unsafe variants leak into the ``benign``/``slang`` buckets).
+    """
+    rest = [c for c in parent_categories if c not in _SAFE_ONLY_CATEGORIES]
+    return list(dict.fromkeys(["obfuscated", "profanity", *rest]))
+
+
 def generate_obfuscated_examples(
     examples: list[Example], per_sentence: int = 2, seed: int = 13
 ) -> list[Example]:
-    """Create obfuscated/emoji profanity evaluation examples from profane or unsafe examples."""
+    """Create obfuscated/emoji profanity evaluation examples from profane or unsafe examples.
+
+    Each variant records ``meta["parent_id"]``; ``assign_splits`` uses it to keep variants in their
+    parent's split.
+    """
     rng = random.Random(seed)
     out: list[Example] = []
     for idx, ex in enumerate(examples):
@@ -153,16 +172,16 @@ def generate_obfuscated_examples(
         has_prof = bool(find_profanity_spans(user_txt)) or ("profanity" in ex.categories)
         base_txt = user_txt if has_prof else f"{user_txt} What the fuck is this bullshit?"
         modes = rng.sample(OBFUSCATION_MODES, k=min(per_sentence, len(OBFUSCATION_MODES)))
+        cats = _obfuscated_categories(ex.categories)
         for m_idx, mode in enumerate(modes):
             obf_txt = apply_obfuscation(base_txt, mode=mode, seed=seed + idx * 10 + m_idx)
-            cats = list(dict.fromkeys([*ex.categories, "obfuscated", "profanity"]))
             out.append(
                 Example(
                     source=f"{ex.source}_obf_{mode}",
                     split=ex.split,
                     turns=[Turn(role="user", content=obf_txt)],
                     label_unsafe=True,
-                    categories=cats,
+                    categories=list(cats),
                     reference_safe=ex.reference_safe,
                     age_band=ex.age_band or "teen_12_18",
                     meta={"obfuscation_mode": mode, "parent_id": ex.id},
