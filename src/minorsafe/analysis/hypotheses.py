@@ -95,7 +95,11 @@ def _prepare(summary_df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = default
     keep = [not bool(_params(r).get("post_filter", False)) for _, r in df.iterrows()]
-    return df[keep].reset_index(drop=True)
+    df = df[keep].reset_index(drop=True)
+    # QLoRA arms (lora_large_mode=qlora) run on an nf4 base but are the LoRA arm of the
+    # default-precision cell; `quant` keeps the true precision, `cell_quant` places the row.
+    df["cell_quant"] = [str(_params(r).get("matched_quant") or r["quant"]) for _, r in df.iterrows()]
+    return df
 
 
 def _num(row: pd.Series | None, col: str) -> float:
@@ -123,7 +127,15 @@ def _pick(
 
 def _cells(df: pd.DataFrame, experiment: str) -> list[tuple[tuple[str, str], pd.DataFrame]]:
     sub = df[df["experiment"] == experiment]
-    return [(key, g) for key, g in sub.groupby(["model", "quant"], sort=True)]
+    quant_col = "cell_quant" if "cell_quant" in sub.columns else "quant"
+    return [(key, g) for key, g in sub.groupby(["model", quant_col], sort=True)]
+
+
+def _arm_tag(row: pd.Series | None) -> str:
+    """Suffix naming a QLoRA arm's true precision in verdict evidence."""
+    if row is None or str(_params(row).get("lora_mode", "")) != "qlora":
+        return ""
+    return f" [LoRA=QLoRA/{row['quant']}]"
 
 
 def _combine(hid: str, rule: str, results: list[tuple[str, bool, str]], reason_if_empty: str) -> Verdict:
@@ -184,7 +196,7 @@ def _h1(df: pd.DataFrame) -> Verdict:
             f"success {vals['s_st']:.3f} vs {vals['s_lo']:.3f}; {cost_col} ratio {vals['c_st'] / vals['c_lo']:.4f}; "
             f"setup_tokens ratio {vals['k_st'] / vals['k_lo']:.4f}; tok_total/M0a {vals['t_st'] / vals['t_m0']:.3f}"
         )
-        results.append((f"{model}/{quant}", ok, detail))
+        results.append((f"{model}/{quant}", ok, detail + _arm_tag(lo)))
     return _combine(
         "H1", rule, results, "No main_grid cell with StTP, LoRA, and M0a (with nonzero LoRA setup cost)."
     )
@@ -470,7 +482,11 @@ def _h7(df: pd.DataFrame, tomo_summary: list[dict[str, Any]] | None = None) -> V
 
 
 def _h8(df: pd.DataFrame) -> Verdict:
-    rule = "main_grid, per (model, quant): mmlu_delta(LoRA) < mmlu_delta(StTP) AND gsm8k_delta(LoRA) < gsm8k_delta(StTP)."
+    rule = (
+        "main_grid, per (model, quant): mmlu_delta(LoRA) < mmlu_delta(StTP) AND gsm8k_delta(LoRA) < "
+        "gsm8k_delta(StTP). Deltas are vs M0a at the arm's own precision, so a QLoRA arm without an M0a "
+        "run at its precision has no delta and its cell is skipped."
+    )
     if not {"mmlu_delta", "gsm8k_delta"}.issubset(df.columns):
         return _not_evaluated(
             "H8", rule, "Capability retention (tinyMMLU/tinyGSM8K) is not wired into the runner."

@@ -35,6 +35,7 @@ from minorsafe.methods.base import MethodOutput, RunContext, create_method
 from minorsafe.runner.grid import RunSpec, expand_experiment_grid, verify_split_guardrail
 from minorsafe.runner.store import RunStore
 from minorsafe.telemetry import GPUSampler, SmartRunLogger
+from minorsafe.telemetry.cost import gpu_allocation
 from minorsafe.utils import DATA_DIR, RESULTS_DIR, git_sha, package_versions, read_json, write_json
 
 
@@ -159,6 +160,8 @@ def run_experiment(
 
     sha = git_sha()
     pkgs = package_versions()
+    # GPUs this job holds (setup GPU-seconds and per-query gpu_s are billed against the allocation).
+    n_alloc_gpus = max(1, profile.num_gpus) if profile.device == "cuda" else 1
 
     def _write_manifest(rdir: Path, rspec: RunSpec, status: str) -> None:
         write_json(
@@ -239,7 +242,8 @@ def run_experiment(
                         max_new_tokens=exp.max_new_tokens,
                     )
                     method = create_method(rspec.method_spec)
-                    setup_rec = method.setup(ctx)
+                    with gpu_allocation(n_alloc_gpus):
+                        setup_rec = method.setup(ctx)
                     write_json(run_dir / "setup.json", setup_rec.to_dict())
                     smart_log.start_run(
                         run_idx=run_idx,
@@ -346,6 +350,7 @@ def run_experiment(
                         models=models,
                         device=profile.device,
                         vllm_gpu_memory_utilization=profile.vllm_gpu_memory_utilization,
+                        vllm_tensor_parallel_size=n_alloc_gpus,
                         baseline_m0_df=baseline_m0_df,
                     )
                     df.to_parquet(store.responses_path, index=False)

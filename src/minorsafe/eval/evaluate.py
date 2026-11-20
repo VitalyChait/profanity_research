@@ -69,6 +69,7 @@ def evaluate_responses_df(
     device: str | None = None,
     vllm_gpu_memory_utilization: float = 0.85,
     baseline_m0_df: pd.DataFrame | None = None,
+    vllm_tensor_parallel_size: int = 1,
 ) -> pd.DataFrame:
     """Compute all evaluation columns over a DataFrame of method responses."""
     eval_settings = eval_settings or EvalSettings(
@@ -152,6 +153,8 @@ def evaluate_responses_df(
             device=dev,
             quant=judge_quant,
             vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+            tensor_parallel_size=vllm_tensor_parallel_size,
+            max_model_len=eval_settings.judge_max_model_len,
         )
         try:
             jdg_rows = judge.score_records(records)

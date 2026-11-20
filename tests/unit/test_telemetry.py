@@ -109,3 +109,35 @@ def test_gpu_sampler_cpu_safe():
         time.sleep(0.02)
     assert s.energy_j >= 0.0
     assert s.peak_mem_mb >= 0.0
+
+
+def test_reasoning_opened_by_chat_template_is_never_an_answer(dummy_lm, dummy_tokenizer):
+    """DeepSeek-R1-Distill templates end with `<think>\\n`; a cut-off chain must not leak as the answer."""
+    reason, ans, unterm = split_reasoning("Okay, let me think about the safest reply", opened_in_prompt=True)
+    assert (reason, ans, unterm) == ("Okay, let me think about the safest reply", "", True)
+    reason, ans, unterm = split_reasoning(
+        "weigh options </think> Here is a kind answer.", opened_in_prompt=True
+    )
+    assert (reason, ans, unterm) == ("weigh options", "Here is a kind answer.", False)
+    # Templates that do not open <think> keep the old behaviour.
+    assert split_reasoning("plain answer") == ("", "plain answer", False)
+
+    spec = ModelSpec(
+        alias="r1_dummy",
+        hf_id="dummy",
+        arch="decoder",
+        role="generator",
+        family="deepseek",
+        size_group="M",
+        reasoning=True,
+        chat_template=True,
+    )
+    dummy_tokenizer.chat_template = "r1"
+    dummy_tokenizer.apply_chat_template = lambda msgs, tokenize=False, add_generation_prompt=True: (
+        f"<｜User｜>{msgs[-1]['content']}<｜Assistant｜><think>\n"
+    )
+    gen = ChatGenerator(dummy_lm, dummy_tokenizer, spec=spec, max_new_tokens=6, min_new_tokens=6)
+    r = gen.generate([[{"role": "user", "content": "Hello there"}]], seed=0)[0]
+    assert r.text == ""
+    assert r.n_out == 0 and r.n_reasoning == 6
+    assert r.truncated is True

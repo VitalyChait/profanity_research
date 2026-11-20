@@ -8,10 +8,29 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 
 from minorsafe.telemetry.timer import cuda_sync
+
+# GPUs allocated to the current job; GPU-seconds = wall-seconds x allocated GPUs (plan §2: total_gpu_s).
+_ALLOCATED_GPUS: ContextVar[int] = ContextVar("minorsafe_allocated_gpus", default=1)
+
+
+def allocated_gpus() -> int:
+    return _ALLOCATED_GPUS.get()
+
+
+@contextmanager
+def gpu_allocation(num_gpus: int) -> Iterator[None]:
+    """Set the GPU count that new ``SetupReport``s bill GPU-seconds against (at least 1)."""
+    token = _ALLOCATED_GPUS.set(max(1, int(num_gpus)))
+    try:
+        yield
+    finally:
+        _ALLOCATED_GPUS.reset(token)
 
 
 @dataclass
@@ -33,7 +52,8 @@ class SetupReport:
     setup_key: str
     stages: list[SetupStage] = field(default_factory=list)
     cached: bool = False  # True when artifacts were reused from a previous run
-    num_gpus: int = 1
+    # Defaults to the enclosing gpu_allocation(); reports loaded from a cache keep their recorded value.
+    num_gpus: int = field(default_factory=allocated_gpus)
 
     @contextmanager
     def stage(self, name: str, examples: int = 0):

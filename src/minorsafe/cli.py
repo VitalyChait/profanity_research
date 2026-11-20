@@ -192,6 +192,7 @@ def cmd_eval(
             models=models,
             device=hw.device,
             vllm_gpu_memory_utilization=hw.vllm_gpu_memory_utilization,
+            vllm_tensor_parallel_size=max(1, hw.num_gpus) if hw.device == "cuda" else 1,
             baseline_m0_df=base_m0,
         )
         eval_df.to_parquet(pq, index=False)

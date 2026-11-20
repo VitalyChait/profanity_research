@@ -56,6 +56,8 @@ class EvalSettings(StrictModel):
     ppl_model: str | None = "gpt2-large"  # None disables perplexity
     judge_backend: Literal["vllm", "hf", "heuristic"] = "vllm"
     judge_model: str | None = None  # alias in models.yaml
+    # Judge context window; inputs that would not fit (with the reply budget) are truncated, never crash.
+    judge_max_model_len: int = 4096
     capability_items: int = 100  # tinyMMLU / tinyGSM8K items
 
 

@@ -15,13 +15,18 @@ from minorsafe.data.neologisms import build_procedural_neologism_pairs
 from minorsafe.data.obfuscation import detect_obfuscated_profanity
 from minorsafe.data.schema import ContrastivePair
 from minorsafe.data.sources import load_seed_pairs
-from minorsafe.eval.safety import compute_safety_metrics
+from minorsafe.eval.safety import compute_safety_metrics, detect_refusal
 from minorsafe.generation import ChatGenerator
 from minorsafe.registry import checkpoint_id, free_model, load_decoder, load_tokenizer
 from minorsafe.telemetry.cost import SetupReport
 from minorsafe.utils import extract_json_object, get_logger, normalize_text
 
 log = get_logger(__name__)
+
+# Concepts whose negative completion must carry profanity/toxicity (lexicon hit, neologism, or Detoxify).
+_PROFANE_NEGATIVE_CONCEPTS = ("profanity", "slang_toxic")
+# Age-inappropriate but non-profane harm: validated by "negative is not a refusal", not by Detoxify.
+_NON_PROFANE_HARM_CONCEPTS = ("mature_theme",)
 
 
 def _shingle_minhash(text: str, num_perm: int = 64) -> MinHash:
@@ -73,7 +78,7 @@ def filter_contrastive_pairs(
             if pos_tox >= 0.10:
                 stats["dropped_positive_unsafe"] += 1
                 continue
-            if p.concept in ("profanity", "mature_theme", "slang_toxic"):
+            if p.concept in _PROFANE_NEGATIVE_CONCEPTS:
                 neg_has_lex = bool(
                     find_profanity_spans(p.negative) or detect_obfuscated_profanity(p.negative)
                 )
@@ -89,6 +94,13 @@ def filter_contrastive_pairs(
                 if not neg_has_lex and not neg_has_neo and neg_tox <= 0.45:
                     stats["dropped_negative_weak"] += 1
                     continue
+
+        if p.concept in _NON_PROFANE_HARM_CONCEPTS and detect_refusal(p.negative):
+            # mature_theme negatives are unguarded age-inappropriate answers without swearing, which
+            # Detoxify (trained on insults/obscenity) scores near zero; a toxicity floor would delete
+            # almost all of them. The real failure mode is a negative that is itself a safe refusal.
+            stats["dropped_negative_weak"] += 1
+            continue
 
         if enforce_fk and p.concept == "lexical_complexity":
             pos_fk = textstat.flesch_kincaid_grade(p.positive)
@@ -124,6 +136,7 @@ def generate_teacher_texts(
     vllm_gpu_memory_utilization: float = 0.85,
     seed: int = 13,
     max_tokens: int = 512,
+    vllm_tensor_parallel_size: int = 1,
 ) -> list[tuple[str, int, int]]:
     """Run batched generation over ``prompts`` using a teacher LLM via vLLM or HF."""
     if not prompts:
@@ -140,6 +153,7 @@ def generate_teacher_texts(
             dtype="auto",
             gpu_memory_utilization=vllm_gpu_memory_utilization,
             max_model_len=2048,
+            tensor_parallel_size=max(1, int(vllm_tensor_parallel_size)),
             seed=seed,
             trust_remote_code=False,
         )
@@ -203,6 +217,7 @@ def _generate_teacher_pairs(
     device: str = "cuda",
     vllm_gpu_memory_utilization: float = 0.85,
     seed: int = 13,
+    vllm_tensor_parallel_size: int = 1,
 ) -> tuple[list[ContrastivePair], int]:
     """Synthesize contrastive pairs using the configured teacher LLM via vLLM or HF."""
     templates = load_prompts().get("synth_pair_templates", {})
@@ -232,6 +247,7 @@ def _generate_teacher_pairs(
         vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
         seed=seed,
         max_tokens=512,
+        vllm_tensor_parallel_size=vllm_tensor_parallel_size,
     )
 
     pairs: list[ContrastivePair] = []
@@ -275,6 +291,7 @@ def synthesize_contrastive_pairs(
     toxicity_backend: str = "lexicon",
     extra_pairs: list[ContrastivePair] | None = None,
     extra_tokens: int = 0,
+    vllm_tensor_parallel_size: int = 1,
 ) -> tuple[list[ContrastivePair], SetupReport]:
     """Generate and validate contrastive pairs across requested concepts, logging SetupReport."""
     rep = setup_report or SetupReport(method="data_synth", setup_key=f"synth_{teacher_backend}_{seed}")
@@ -293,6 +310,7 @@ def synthesize_contrastive_pairs(
                 device=device,
                 vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
                 seed=seed,
+                vllm_tensor_parallel_size=vllm_tensor_parallel_size,
             )
             st.tokens += teacher_toks
         st.tokens += int(extra_tokens)

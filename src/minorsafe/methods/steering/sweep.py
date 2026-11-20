@@ -19,7 +19,7 @@ from minorsafe.methods.steering.extract import (
 from minorsafe.methods.steering.hooks import ConceptDirection, ResidualSteeringHook
 from minorsafe.registry import get_decoder_layers
 from minorsafe.telemetry.cost import SetupReport
-from minorsafe.utils import get_logger, read_json, write_json
+from minorsafe.utils import get_logger, read_json, stable_hash, write_json
 
 log = get_logger(__name__)
 
@@ -57,6 +57,31 @@ def _quick_dev_score(
     return succ_hits / float(n), sum(ppl_deltas) / float(max(1, len(ppl_deltas)))
 
 
+def sweep_setup_key(
+    model_alias: str,
+    *,
+    quant: str,
+    mode: str,
+    estimator: str,
+    n_calib: int,
+    concepts: list[str],
+    pooling: str,
+    orthogonal_concept: str | None,
+    grid: dict,
+) -> str:
+    """Cache key covering every input that changes the sweep result (precision, concepts, grid, ...)."""
+    digest = stable_hash(
+        {
+            "concepts": sorted(concepts),
+            "pooling": pooling,
+            "orthogonal_concept": orthogonal_concept if estimator == "ortho" else None,
+            "grid": grid,
+        },
+        length=8,
+    )
+    return f"sweep_{model_alias}_{quant}_{mode}_{estimator}_N{n_calib}_{digest}"
+
+
 def sweep_steering_hyperparams(
     *,
     model,
@@ -70,6 +95,7 @@ def sweep_steering_hyperparams(
     orthogonal_concept: str | None = "slang_benign",
     pooling: str = "mean_completion",
     n_calib: int = 100,
+    quant: str = "bf16",
     rel_depths: tuple[float, ...] = (0.25, 0.35, 0.45, 0.55, 0.65, 0.75),
     alphas: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0),
     offsets: tuple[float, ...] = (0.0, 0.5, 1.0),
@@ -78,8 +104,28 @@ def sweep_steering_hyperparams(
     max_new_tokens: int = 128,
     artifact_dir: Path | None = None,
 ) -> tuple[dict, SetupReport]:
-    """Sweep candidate layers and strengths on ``dev_examples`` maximizing success with ΔPPL <= 10%."""
-    setup_key = f"sweep_{gen_spec.alias}_{mode}_{estimator}_N{n_calib}"
+    """Sweep candidate layers and strengths on ``dev_examples`` maximizing success with ΔPPL <= 10%.
+
+    ``quant`` is the precision of ``model``; the sweep must be re-run per precision (H10 / quant_grid).
+    """
+    setup_key = sweep_setup_key(
+        gen_spec.alias,
+        quant=quant,
+        mode=mode,
+        estimator=estimator,
+        n_calib=n_calib,
+        concepts=concepts,
+        pooling=pooling,
+        orthogonal_concept=orthogonal_concept,
+        grid={
+            "rel_depths": list(rel_depths),
+            "alphas": list(alphas),
+            "offsets": list(offsets),
+            "max_dev": max_dev,
+            "max_ppl_delta_pct": max_ppl_delta_pct,
+            "max_new_tokens": max_new_tokens,
+        },
+    )
     cache_path = (Path(artifact_dir) / f"{setup_key}.json") if artifact_dir else None
     if cache_path is not None and cache_path.exists():
         cached = read_json(cache_path)

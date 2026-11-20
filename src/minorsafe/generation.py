@@ -31,8 +31,20 @@ class GenResult:
     truncated: bool = False
 
 
-def split_reasoning(raw: str) -> tuple[str, str, bool]:
-    """Return (reasoning, answer, reasoning_unterminated)."""
+def prompt_opens_reasoning(prompt: str) -> bool:
+    """True when the rendered chat prompt already opened a ``<think>`` block (DeepSeek-R1-Distill templates
+    end with ``<｜Assistant｜><think>\\n``), so the completion starts *inside* the reasoning."""
+    return prompt.rstrip().endswith("<think>")
+
+
+def split_reasoning(raw: str, opened_in_prompt: bool = False) -> tuple[str, str, bool]:
+    """Return (reasoning, answer, reasoning_unterminated).
+
+    With ``opened_in_prompt`` the completion carries no opening tag, so text without ``</think>`` is an
+    unfinished reasoning chain (e.g. cut off by ``max_new_tokens``), never a visible answer.
+    """
+    if opened_in_prompt and not raw.lstrip().startswith("<think>"):
+        raw = "<think>" + raw
     if "</think>" in raw:
         head, _, tail = raw.partition("</think>")
         return head.replace("<think>", "").strip(), tail.strip(), False
@@ -126,6 +138,7 @@ class ChatGenerator:
         span: str = "generate",
     ) -> list[GenResult]:
         prompts = [format_chat(self.tok, msgs, self.spec) for msgs in batch_messages]
+        opened = [self.reasoning and prompt_opens_reasoning(p) for p in prompts]
         enc = self.tok(prompts, return_tensors="pt", padding=True, add_special_tokens=False).to(self.device)
         attn = enc["attention_mask"]
         n_in = attn.sum(dim=1).tolist()
@@ -164,10 +177,13 @@ class ChatGenerator:
                     break
             raw = self.tok.decode(ids[:n], skip_special_tokens=True)
             if self.reasoning:
-                reasoning, answer, unterminated = split_reasoning(raw)
-                n_reason = self.count_tokens(reasoning) if reasoning else 0
-                n_reason = min(n_reason, n)
-                n_vis = n - n_reason
+                reasoning, answer, unterminated = split_reasoning(raw, opened_in_prompt=opened[i])
+                if unterminated:
+                    # Every generated token belongs to the unfinished reasoning chain; nothing is visible.
+                    n_reason, n_vis = n, 0
+                else:
+                    n_reason = min(self.count_tokens(reasoning) if reasoning else 0, n)
+                    n_vis = n - n_reason
             else:
                 answer, n_reason, n_vis, unterminated = raw.strip(), 0, n, False
             results.append(

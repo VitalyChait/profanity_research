@@ -41,23 +41,49 @@ def verify_split_guardrail(exp: ExperimentSpec, final: bool = False) -> None:
         )
 
 
+QLORA_QUANT: Quant = "nf4"
+
+
+def _uses_qlora(base_method: MethodSpec, gen_spec: ModelSpec, profile: HardwareProfile) -> bool:
+    """True when this profile trains L-tier LoRA as QLoRA (``lora_large_mode: qlora``)."""
+    return (
+        base_method.kind == "lora"
+        and profile.lora_large_mode == "qlora"
+        and (gen_spec.size_group or "S") == "L"
+    )
+
+
 def expand_experiment_grid(
     exp: ExperimentSpec,
     profile: HardwareProfile,
     models: dict[str, ModelSpec],
 ) -> list[RunSpec]:
-    """Expand an ExperimentSpec into concrete (method, generator, quant, sweep, age_band) RunSpecs."""
+    """Expand an ExperimentSpec into concrete (method, generator, quant, sweep, age_band) RunSpecs.
+
+    On profiles with ``lora_large_mode: qlora`` the default-precision LoRA arm of an L-tier generator
+    runs as QLoRA (``nf4`` base); the run keeps ``quant='nf4'`` and records
+    ``lora_mode='qlora'`` / ``matched_quant=<profile default>`` so analysis compares it against the
+    other methods' default-precision cell. Explicit ``quants`` in a run group are never overridden.
+    """
     specs: list[RunSpec] = []
     for group in exp.runs:
         base_method = load_method(group.method)
         gen_aliases = select_generators(group.generators, profile, models)
-        quants: list[Quant] = list(group.quants) if group.quants else [profile.default_quant]
 
         sweep_keys = list(group.sweep.keys())
         sweep_vals = [group.sweep[k] for k in sweep_keys]
         sweep_combos = list(itertools.product(*sweep_vals)) if sweep_keys else [()]
 
         for gen_alias in gen_aliases:
+            qlora = not group.quants and _uses_qlora(base_method, models[gen_alias], profile)
+            if qlora and QLORA_QUANT not in profile.allowed_quants:
+                raise ValueError(
+                    f"Profile {profile.name!r} sets lora_large_mode=qlora but does not allow "
+                    f"{QLORA_QUANT!r} quantization (needed for {gen_alias})."
+                )
+            quants: list[Quant] = (
+                list(group.quants) if group.quants else [QLORA_QUANT if qlora else profile.default_quant]
+            )
             for quant in quants:
                 if quant not in profile.allowed_quants:
                     continue
@@ -67,6 +93,9 @@ def expand_experiment_grid(
                         merged_params.update(group.params)
                         for k, v in zip(sweep_keys, combo, strict=True):
                             merged_params[k] = v
+                        if qlora:
+                            merged_params["lora_mode"] = "qlora"
+                            merged_params["matched_quant"] = profile.default_quant
 
                         method_copy = MethodSpec(
                             name=base_method.name,

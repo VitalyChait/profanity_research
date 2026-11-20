@@ -1,5 +1,5 @@
 name: multi_gpu_80gb
-description: "Multi-GPU 80 GB node (2-8x A100/H100). Parallel worker shards across GPUs."
+description: "Multi-GPU 80 GB node (2-8x A100/H100). vLLM teacher/judge run tensor-parallel over num_gpus; HF generator runs execute sequentially on one device. GPU-seconds are billed per allocated GPU."
 device: cuda
 min_vram_gb: 70.0
 num_gpus: 2

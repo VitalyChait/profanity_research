@@ -14,6 +14,7 @@ from minorsafe.data.sources import load_all_sources
 from minorsafe.data.splits import assign_splits, check_split_leakage
 from minorsafe.data.synth import synthesize_contrastive_pairs
 from minorsafe.hardware import resolve_profile_name
+from minorsafe.telemetry.cost import gpu_allocation
 from minorsafe.utils import DATA_DIR, RESULTS_DIR, get_logger, write_json
 
 log = get_logger(__name__)
@@ -104,12 +105,14 @@ def build_dataset(
     teacher_backend = "mock"
     device = "cpu"
     vllm_util = 0.85
+    tp_size = 1
     tox_backend = "lexicon"
     if not offline and hardware_profile:
         hw = load_hardware(resolve_profile_name(hardware_profile))
         teacher_backend = hw.teacher_backend
         device = hw.device
         vllm_util = hw.vllm_gpu_memory_utilization
+        tp_size = max(1, hw.num_gpus) if hw.device == "cuda" else 1
         tox_backend = hw.eval.toxicity_backend
         teacher_alias = teacher_override or spec.synth_teacher or hw.teacher
         if teacher_alias:
@@ -130,6 +133,7 @@ def build_dataset(
             device=device,
             vllm_gpu_memory_utilization=vllm_util,
             seed=spec.seed,
+            vllm_tensor_parallel_size=tp_size,
         )
         neo_examples = [e for e in neo_examples if is_english(e.last_user, min_ratio=spec.english_min_ratio)]
 
@@ -137,19 +141,23 @@ def build_dataset(
         [*english_examples, *obf_examples, *neo_examples], ratios=spec.split_ratios, seed=spec.seed
     )
 
-    raw_pairs, synth_rep = synthesize_contrastive_pairs(
-        concepts=spec.concepts,
-        pairs_per_concept=min(spec.synth_pairs_per_concept, 60 if offline else spec.synth_pairs_per_concept),
-        seed=spec.seed,
-        teacher_spec=teacher_spec,
-        teacher_backend=teacher_backend,
-        oversample=spec.synth_oversample,
-        device=device,
-        vllm_gpu_memory_utilization=vllm_util,
-        toxicity_backend=tox_backend,
-        extra_pairs=neo_pairs,
-        extra_tokens=neo_tokens,
-    )
+    with gpu_allocation(tp_size):
+        raw_pairs, synth_rep = synthesize_contrastive_pairs(
+            concepts=spec.concepts,
+            pairs_per_concept=min(
+                spec.synth_pairs_per_concept, 60 if offline else spec.synth_pairs_per_concept
+            ),
+            seed=spec.seed,
+            teacher_spec=teacher_spec,
+            teacher_backend=teacher_backend,
+            oversample=spec.synth_oversample,
+            device=device,
+            vllm_gpu_memory_utilization=vllm_util,
+            toxicity_backend=tox_backend,
+            extra_pairs=neo_pairs,
+            extra_tokens=neo_tokens,
+            vllm_tensor_parallel_size=tp_size,
+        )
     all_pairs = assign_splits(raw_pairs, ratios=spec.pair_split_ratios, seed=spec.seed)
 
     proc_dir = data_dir / "processed"

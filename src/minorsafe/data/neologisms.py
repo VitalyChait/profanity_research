@@ -509,6 +509,7 @@ def synthesize_neologism_data_with_llm(
     device: str = "cuda",
     vllm_gpu_memory_utilization: float = 0.85,
     seed: int = 13,
+    vllm_tensor_parallel_size: int = 1,
 ) -> tuple[list[Example], list[ContrastivePair], int]:
     """Use a cheaper teacher LLM to generate realistic teen examples and pairs using unseen neologisms."""
     if (n_examples <= 0 and n_pairs <= 0) or teacher_backend not in ("vllm", "hf"):
@@ -575,6 +576,7 @@ def synthesize_neologism_data_with_llm(
         vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
         seed=seed,
         max_tokens=320,
+        vllm_tensor_parallel_size=vllm_tensor_parallel_size,
     )
 
     examples: list[Example] = []

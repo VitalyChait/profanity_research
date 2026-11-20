@@ -104,6 +104,7 @@ def heuristic_judge_score(
         "judge_is_refusal": saf["is_refusal"],
         "judge_rationale": "Evaluated via heuristic rubric (cpu_debug).",
         "judge_parse_ok": True,
+        "judge_input_truncated": False,
         "judge_tok_in": 0,
         "judge_tok_out": 0,
         "judge_wall_s": 0.0,
@@ -123,12 +124,18 @@ class LLMJudge:
         vllm_gpu_memory_utilization: float = 0.85,
         rubric_template: str | None = None,
         max_retries: int = 2,
+        tensor_parallel_size: int = 1,
+        max_model_len: int = 4096,
+        max_output_tokens: int = 256,
     ) -> None:
         self.spec = judge_spec
         self.backend = backend
         self.device = device
         self.quant = quant
         self.vllm_gpu_memory_utilization = vllm_gpu_memory_utilization
+        self.tensor_parallel_size = max(1, int(tensor_parallel_size))
+        self.max_model_len = int(max_model_len)
+        self.max_output_tokens = int(max_output_tokens)
         self.rubric_template = rubric_template or load_prompts()["judge_rubric"]
         self.max_retries = max_retries
         self._llm = None
@@ -148,7 +155,8 @@ class LLMJudge:
                 model=ckpt,
                 dtype="auto",
                 gpu_memory_utilization=self.vllm_gpu_memory_utilization,
-                max_model_len=2048,
+                max_model_len=self.max_model_len,
+                tensor_parallel_size=self.tensor_parallel_size,
                 trust_remote_code=False,
             )
         elif self.backend == "hf":
@@ -157,7 +165,9 @@ class LLMJudge:
             model, tok, _ = load_decoder(self.spec, quant=self.quant, device=self.device)
             self._hf_model = model
             self._tok = tok
-            self._hf_gen = ChatGenerator(model, tok, spec=self.spec, max_new_tokens=256, temperature=0.0)
+            self._hf_gen = ChatGenerator(
+                model, tok, spec=self.spec, max_new_tokens=self.max_output_tokens, temperature=0.0
+            )
         else:
             raise ValueError(f"LLMJudge requires backend 'vllm' or 'hf', got {self.backend!r}")
 
@@ -178,26 +188,61 @@ class LLMJudge:
             body += "\nIMPORTANT: Return ONLY one valid JSON object and nothing else."
         return body
 
+    def _render(self, user_prompt: str) -> str:
+        if self._tok is not None and getattr(self._tok, "chat_template", None):
+            try:
+                return self._tok.apply_chat_template(
+                    [{"role": "user", "content": user_prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except Exception:
+                pass
+        return user_prompt
+
+    def _n_tokens(self, text: str) -> int:
+        assert self._tok is not None
+        return len(self._tok(text, add_special_tokens=False)["input_ids"])
+
+    def _truncate_tokens(self, text: str, keep: int) -> str:
+        assert self._tok is not None
+        ids = self._tok(text, add_special_tokens=False)["input_ids"]
+        if len(ids) <= keep:
+            return text
+        return self._tok.decode(ids[: max(0, keep)], skip_special_tokens=True).rstrip() + " [...truncated]"
+
+    def _fit_record(self, row: dict) -> tuple[dict, bool]:
+        """Shrink response / prompt / reference (in that order) until the judge input fits the context.
+
+        Budget: ``max_model_len`` minus the reply budget and a small margin for chat-template tokens.
+        Returns (row_to_score, was_truncated). An over-long input would otherwise make vLLM reject the
+        whole batch.
+        """
+        if self._tok is None:
+            return row, False
+        budget = self.max_model_len - self.max_output_tokens - 16
+        fitted = dict(row)
+        truncated = False
+        for field in ("text", "prompt", "reference_safe"):
+            overflow = (
+                self._n_tokens(self._render(self._format_user_prompt(fitted, strict_retry=True))) - budget
+            )
+            if overflow <= 0:
+                return fitted, truncated
+            val = fitted.get(field)
+            if val is None or (isinstance(val, float) and pd.isna(val)) or not str(val).strip():
+                continue
+            n_field = self._n_tokens(str(val))
+            fitted[field] = self._truncate_tokens(str(val), max(32, n_field - overflow - 8))
+            truncated = True
+        return fitted, truncated
+
     def _run_vllm_batch(self, user_prompts: list[str]) -> list[tuple[str, int, int]]:
         from vllm import SamplingParams
 
         assert self._llm is not None and self._tok is not None
-        rendered = []
-        for p in user_prompts:
-            if getattr(self._tok, "chat_template", None):
-                try:
-                    rendered.append(
-                        self._tok.apply_chat_template(
-                            [{"role": "user", "content": p}],
-                            tokenize=False,
-                            add_generation_prompt=True,
-                        )
-                    )
-                    continue
-                except Exception:
-                    pass
-            rendered.append(p)
-        params = SamplingParams(temperature=0.0, max_tokens=256)
+        rendered = [self._render(p) for p in user_prompts]
+        params = SamplingParams(temperature=0.0, max_tokens=self.max_output_tokens)
         outputs = self._llm.generate(rendered, params)
         results: list[tuple[str, int, int]] = []
         for req_out in outputs:
@@ -222,6 +267,8 @@ class LLMJudge:
         if not records:
             return []
         self._ensure_loaded()
+        fitted = [self._fit_record(r) for r in records]
+        records = [r for r, _ in fitted]
         n = len(records)
         verdicts: list[dict | None] = [None] * n
         parse_flags: list[bool] = [False] * n
@@ -267,6 +314,7 @@ class LLMJudge:
                     "judge_is_refusal": bool(v["is_refusal"]),
                     "judge_rationale": v["rationale"],
                     "judge_parse_ok": bool(parse_flags[i]),
+                    "judge_input_truncated": bool(fitted[i][1]),
                     "judge_tok_in": int(tok_in_totals[i]),
                     "judge_tok_out": int(tok_out_totals[i]),
                     "judge_wall_s": float(wall_totals[i]),

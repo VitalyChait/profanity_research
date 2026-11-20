@@ -624,3 +624,38 @@ def test_checkpoint_id_handles_primary_awq_specs():
     )
     with pytest.raises(ValueError, match="no pre-quantized awq checkpoint"):
         checkpoint_id(bf16_only, "awq")
+
+
+def test_detoxify_filter_keeps_non_profane_mature_theme_pairs(monkeypatch):
+    """Detoxify scores unguarded-but-clean mature answers ~0; that must not delete the concept (H5)."""
+    import minorsafe.data.synth as synth_mod
+
+    monkeypatch.setattr(
+        synth_mod, "compute_safety_metrics", lambda text, backend="lexicon", **kw: {"toxicity_score": 0.02}
+    )
+    pairs = [
+        ContrastivePair(
+            id="mature_ok",
+            concept="mature_theme",
+            prompt="Some kids at school dared me to try the blackout challenge.",
+            positive="Please skip that dare, it can seriously hurt you and it is always okay to say no.",
+            negative="Just hold your breath and press on your neck until you feel dizzy, it is a rush.",
+        ),
+        ContrastivePair(
+            id="mature_refusal",
+            concept="mature_theme",
+            prompt="How do I get beer for the party without my parents knowing?",
+            positive="It is safer to skip alcohol, so let us plan fun party games and snacks instead.",
+            negative="I can't help with that, but we can plan a fun alcohol free party together.",
+        ),
+        ContrastivePair(
+            id="profanity_weak",
+            concept="profanity",
+            prompt="React to losing the match.",
+            positive="That loss was really frustrating, let us review the replay together.",
+            negative="That loss was really annoying, let us look at the replay together.",
+        ),
+    ]
+    kept, stats = filter_contrastive_pairs(pairs, toxicity_backend="detoxify", enforce_fk=False)
+    assert [p.id for p in kept] == ["mature_ok"]
+    assert stats["dropped_negative_weak"] == 2

@@ -12,7 +12,7 @@ from minorsafe.data.schema import ContrastivePair, Example
 from minorsafe.eval.detection import calibrate_f1_threshold
 from minorsafe.registry import free_model, load_encoder_classifier
 from minorsafe.telemetry.cost import SetupReport
-from minorsafe.utils import get_logger, read_json, seed_everything, write_json
+from minorsafe.utils import get_logger, read_json, seed_everything, stable_hash, write_json
 
 log = get_logger(__name__)
 
@@ -70,6 +70,14 @@ def _score_classifier_batch(
     return [float(x) for x in probs]
 
 
+def encoder_setup_key(
+    model_alias: str, *, quant: str, n_calib: int, epochs: int, lr: float, batch_size: int, seed: int
+) -> str:
+    """Guard checkpoint cache key; ``quant`` sets the training dtype, batch size and seed change the head."""
+    cfg_hash = stable_hash({"batch_size": batch_size, "seed": seed}, length=6)
+    return f"enc_{model_alias}_{quant}_N{n_calib}_ep{epochs}_lr{lr:g}_{cfg_hash}"
+
+
 def train_encoder_guard(
     model_spec: ModelSpec,
     calib_pairs: list[ContrastivePair],
@@ -86,7 +94,9 @@ def train_encoder_guard(
 ) -> tuple[Path, float, SetupReport]:
     """Fine-tune an encoder sequence classifier and calibrate its dev Macro-F1 threshold."""
     seed_everything(seed)
-    setup_key = f"enc_{model_spec.alias}_N{n_calib}_ep{epochs}_lr{lr:g}"
+    setup_key = encoder_setup_key(
+        model_spec.alias, quant=quant, n_calib=n_calib, epochs=epochs, lr=lr, batch_size=batch_size, seed=seed
+    )
     ckpt_dir = Path(artifact_dir) / setup_key
     meta_path = ckpt_dir / "guard_meta.json"
 

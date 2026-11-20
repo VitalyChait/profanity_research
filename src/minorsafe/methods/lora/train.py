@@ -13,7 +13,7 @@ from minorsafe.config import ModelSpec
 from minorsafe.data.schema import ContrastivePair
 from minorsafe.generation import format_chat
 from minorsafe.telemetry.cost import SetupReport
-from minorsafe.utils import get_logger, read_json, seed_everything, write_json
+from minorsafe.utils import get_logger, read_json, seed_everything, stable_hash, write_json
 
 log = get_logger(__name__)
 
@@ -90,6 +90,35 @@ def _resolve_target_modules(model) -> list[str] | str:
     return found if found else "all-linear"
 
 
+def lora_setup_key(
+    model_alias: str,
+    *,
+    quant: str,
+    n_calib: int,
+    r: int,
+    epochs: int,
+    concepts: list[str] | None,
+    lora_alpha: int,
+    lora_dropout: float,
+    lr: float,
+    batch_size: int,
+    seed: int,
+) -> str:
+    """Adapter cache key: every training input that changes the adapter, so no config reuses another's."""
+    cfg_hash = stable_hash(
+        {
+            "concepts": sorted(set(concepts)) if concepts else None,
+            "lora_alpha": lora_alpha,
+            "lora_dropout": lora_dropout,
+            "lr": lr,
+            "batch_size": batch_size,
+            "seed": seed,
+        },
+        length=8,
+    )
+    return f"lora_{model_alias}_{quant}_N{n_calib}_r{r}_ep{epochs}_{cfg_hash}"
+
+
 def train_lora_adapter(
     model,
     tokenizer,
@@ -123,7 +152,19 @@ def train_lora_adapter(
             len(filtered),
         )
 
-    setup_key = f"lora_{gen_spec.alias}_{quant}_N{n_calib}_r{r}_ep{epochs}"
+    setup_key = lora_setup_key(
+        gen_spec.alias,
+        quant=quant,
+        n_calib=n_calib,
+        r=r,
+        epochs=epochs,
+        concepts=concepts,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        lr=lr,
+        batch_size=batch_size,
+        seed=seed,
+    )
     adapter_dir = Path(artifact_dir) / setup_key
     meta_path = adapter_dir / "lora_meta.json"
 

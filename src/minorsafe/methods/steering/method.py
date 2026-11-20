@@ -7,22 +7,23 @@ No hidden lexicon post-processing: the returned text is exactly what the steered
 from __future__ import annotations
 
 import time
+from dataclasses import asdict
 
 from minorsafe.data.schema import Example
 from minorsafe.methods.actions import MLMRecomposer, execute_moderation_action
 from minorsafe.methods.base import MethodOutput, ResponseMethod, RunContext
 from minorsafe.methods.guards.method import _resolve_mlm_spec
 from minorsafe.methods.steering.extract import (
+    apply_target_offset,
     extract_or_load_directions,
     load_steering_artifact,
-    save_steering_artifact,
     steering_setup_key,
 )
 from minorsafe.methods.steering.hooks import ResidualSteeringHook
 from minorsafe.methods.steering.probes import ResidualLinearProbe
 from minorsafe.methods.steering.sweep import sweep_steering_hyperparams
 from minorsafe.registry import free_model, get_decoder_layers, load_decoder
-from minorsafe.telemetry.cost import SetupReport
+from minorsafe.telemetry.cost import SetupReport, SetupStage
 from minorsafe.telemetry.tokens import TokenUsage
 
 
@@ -49,7 +50,9 @@ class SteeringResponseMethod(ResponseMethod):
         assert self.model is not None and self.tokenizer is not None
         self._cpu_fixture_mode = bool(ctx.hardware.allow_placeholders and ctx.preloaded_generator is not None)
         n_calib = int(self.spec.params.get("n_calib", 50))
-        layers = get_decoder_layers(self.model, layers_path=ctx.generator_spec.layers_path)
+        # Keep only the layer count: a live reference to the ModuleList would pin the generator's weights
+        # in VRAM when the BF16-transfer path below releases the generator.
+        n_layers = len(get_decoder_layers(self.model, layers_path=ctx.generator_spec.layers_path))
         rel_depth = float(self.spec.params.get("layer_rel_depth", 0.50))
         swept_best: dict | None = None
         should_sweep = (
@@ -59,8 +62,9 @@ class SteeringResponseMethod(ResponseMethod):
             and (not ctx.hardware.allow_placeholders or bool(self.spec.params.get("force_sweep", False)))
         )
 
+        sweep_rep: SetupReport | None = None
         if should_sweep:
-            swept_best, _ = sweep_steering_hyperparams(
+            swept_best, sweep_rep = sweep_steering_hyperparams(
                 model=self.model,
                 tokenizer=self.tokenizer,
                 gen_spec=ctx.generator_spec,
@@ -72,13 +76,14 @@ class SteeringResponseMethod(ResponseMethod):
                 orthogonal_concept=self.orthogonal_concept,
                 pooling=self.pooling,
                 n_calib=n_calib,
+                quant=ctx.quant,
                 artifact_dir=ctx.artifact_dir,
             )
             rel_depth = float(swept_best.get("layer_rel_depth", rel_depth))
             self.alpha = float(swept_best.get("alpha", self.alpha))
             self.target_offset_sigma = float(swept_best.get("target_offset_sigma", self.target_offset_sigma))
 
-        target_layer = max(0, min(len(layers) - 1, int(round(rel_depth * (len(layers) - 1)))))
+        target_layer = max(0, min(n_layers - 1, int(round(rel_depth * (n_layers - 1)))))
 
         if self.mode == "probe_guard":
             if self.action == "mlm_substitute" and not self._cpu_fixture_mode:
@@ -114,34 +119,19 @@ class SteeringResponseMethod(ResponseMethod):
                 [target_layer],
                 n_calib,
                 self.concepts,
+                self.orthogonal_concept,
             )
             cached = load_steering_artifact(ctx.artifact_dir, bf16_key) if ctx.artifact_dir else None
             if cached is not None:
                 directions, rep = cached
+                # The artifact stores s_l for its extraction-time offset; re-target to this run's offset.
+                apply_target_offset(directions, self.target_offset_sigma)
             else:
-                bf16_model, bf16_tok, _ = load_decoder(
-                    ctx.generator_spec, quant="bf16", device=ctx.hardware.device
-                )
-                try:
-                    directions, rep = extract_or_load_directions(
-                        model=bf16_model,
-                        tokenizer=bf16_tok,
-                        model_alias=ctx.generator_spec.alias,
-                        quant="bf16",
-                        pairs=ctx.calib_pairs,
-                        concepts=self.concepts,
-                        layer_indices=[target_layer],
-                        artifact_dir=ctx.artifact_dir,
-                        estimator=self.estimator,
-                        orthogonal_concept=self.orthogonal_concept,
-                        pooling=self.pooling,
-                        target_offset_sigma=self.target_offset_sigma,
-                        n_calib=n_calib,
-                    )
-                finally:
-                    free_model(bf16_model, bf16_tok)
-            if ctx.artifact_dir is not None:
-                save_steering_artifact(ctx.artifact_dir, bf16_key, directions, rep)
+                # Never hold the quantized generator and a full BF16 copy at once: release the generator,
+                # extract on BF16 (which caches the artifact), then reload the quantized generator.
+                self._release_generator()
+                directions, rep = self._extract_bf16_directions(ctx, target_layer, n_calib)
+                self._init_generator(ctx)
         else:
             directions, rep = extract_or_load_directions(
                 model=self.model,
@@ -162,14 +152,48 @@ class SteeringResponseMethod(ResponseMethod):
         rep.method = self.name
         if swept_best is not None and rep.stages:
             rep.stages[0].extra["swept_params"] = swept_best
+        if sweep_rep is not None:
+            rep = _with_sweep_cost(rep, sweep_rep)
         self.hook = ResidualSteeringHook(
             directions=directions,
             mode=self.mode,
             alpha=self.alpha,
             prefill=False,
         )
+        layers = get_decoder_layers(self.model, layers_path=ctx.generator_spec.layers_path)
         self.hook.attach(layers[target_layer])
         return rep
+
+    def _release_generator(self) -> None:
+        """Drop this method's references to its own generator so ``free_model`` can reclaim the VRAM."""
+        if not self._owns_model:
+            return
+        self.model = None
+        self.tokenizer = None
+        self.generator = None
+        free_model()
+
+    def _extract_bf16_directions(self, ctx: RunContext, target_layer: int, n_calib: int):
+        bf16_model, bf16_tok, _ = load_decoder(ctx.generator_spec, quant="bf16", device=ctx.hardware.device)
+        try:
+            return extract_or_load_directions(
+                model=bf16_model,
+                tokenizer=bf16_tok,
+                model_alias=ctx.generator_spec.alias,
+                quant="bf16",
+                pairs=ctx.calib_pairs,
+                concepts=self.concepts,
+                layer_indices=[target_layer],
+                artifact_dir=ctx.artifact_dir,
+                estimator=self.estimator,
+                orthogonal_concept=self.orthogonal_concept,
+                pooling=self.pooling,
+                target_offset_sigma=self.target_offset_sigma,
+                n_calib=n_calib,
+            )
+        finally:
+            del bf16_model, bf16_tok
+            free_model()
 
     def _generate_batch_with_prefill_probe(
         self, batch_msgs: list[list[dict]], seed: int
@@ -335,3 +359,23 @@ class SteeringResponseMethod(ResponseMethod):
             self._mlm = None
         self.probe = None
         super().teardown()
+
+
+def _with_sweep_cost(rep: SetupReport, sweep_rep: SetupReport) -> SetupReport:
+    """Return ``rep`` plus the dev-sweep stages, so setup cost includes the hyperparameter search (H1).
+
+    A cached sweep contributes its original measured cost (as cached LoRA/encoder artifacts do); each
+    sweep stage is tagged with ``extra["sweep_cached"]``. ``cached`` stays True only if both parts were.
+    Returns a new report so a report loaded from an artifact cache is never mutated in place.
+    """
+    sweep_stages = [
+        SetupStage(**{**asdict(st), "extra": {**st.extra, "sweep_cached": bool(sweep_rep.cached)}})
+        for st in sweep_rep.stages
+    ]
+    return SetupReport(
+        method=rep.method,
+        setup_key=rep.setup_key,
+        stages=[*rep.stages, *sweep_stages],
+        cached=bool(rep.cached and sweep_rep.cached),
+        num_gpus=rep.num_gpus,
+    )

@@ -453,10 +453,29 @@ def steering_setup_key(
     layer_indices: list[int],
     n_calib: int,
     concepts: list[str],
+    orthogonal_concept: str | None = None,
 ) -> str:
+    """Cache key covering every input that changes the extracted directions.
+
+    ``target_offset_sigma`` is deliberately excluded: ``s_l`` is recomputed on load via
+    :func:`apply_target_offset`. The nuisance concept only matters for the ``ortho`` estimator.
+    """
     c_hash = stable_hash(sorted(concepts), length=6)
     l_tag = "-".join(str(x) for x in layer_indices)
-    return f"steer_{model_alias}_{quant}_{estimator}_{pooling}_L{l_tag}_N{n_calib}_{c_hash}"
+    key = f"steer_{model_alias}_{quant}_{estimator}_{pooling}_L{l_tag}_N{n_calib}_{c_hash}"
+    if estimator == "ortho" and orthogonal_concept:
+        key += f"_O{orthogonal_concept}"
+    return key
+
+
+def apply_target_offset(directions: list[ConceptDirection], target_offset_sigma: float) -> None:
+    """Recompute each direction's StTP target ``s_l`` for ``target_offset_sigma`` (in place).
+
+    Cached artifacts store ``s_l`` for the offset used at extraction time; callers that reuse them with a
+    different (e.g. swept) offset must call this so the hook does not steer toward a stale target.
+    """
+    for cd in directions:
+        cd.s_l = float(max(cd.mu_pos + target_offset_sigma * cd.sigma_pos, cd.m_l + 0.1 * cd.sigma_pos))
 
 
 def save_steering_artifact(
@@ -538,15 +557,14 @@ def extract_or_load_directions(
     n_calib: int = 100,
 ) -> tuple[list[ConceptDirection], SetupReport]:
     """Load cached steering directions from ``artifact_dir`` when available, else extract and cache."""
-    key = steering_setup_key(model_alias, quant, estimator, pooling, layer_indices, n_calib, concepts)
+    key = steering_setup_key(
+        model_alias, quant, estimator, pooling, layer_indices, n_calib, concepts, orthogonal_concept
+    )
     if artifact_dir is not None:
         cached = load_steering_artifact(artifact_dir, key)
         if cached is not None:
             directions, rep = cached
-            for cd in directions:
-                cd.s_l = float(
-                    max(cd.mu_pos + target_offset_sigma * cd.sigma_pos, cd.m_l + 0.1 * cd.sigma_pos)
-                )
+            apply_target_offset(directions, target_offset_sigma)
             return directions, rep
 
     directions, rep = extract_steering_directions(
