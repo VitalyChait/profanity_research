@@ -8,6 +8,7 @@ import torch
 
 from minorsafe.methods.steering.extract import (
     calibrate_hyperplane_from_activations,
+    extract_or_load_directions,
     extract_steering_directions,
     orthogonalize_vector,
 )
@@ -82,3 +83,65 @@ def test_extract_steering_directions_on_dummy_model(dummy_lm, dummy_tokenizer, s
         assert cd.vector.shape == (dummy_lm.hidden_size,)
         assert np.isfinite(cd.m_l) and np.isfinite(cd.s_l)
     assert report.tokens > 0
+
+
+def test_token_level_hyperplane_calibration_and_effective_ncalib_capping(
+    dummy_lm, dummy_tokenizer, sample_pairs, tmp_path
+):
+    rng = np.random.default_rng(7)
+    d = 16
+    true_dir = np.zeros(d, dtype=np.float32)
+    true_dir[0] = 1.0
+
+    # Tight pooled pair clusters vs broader single-token distribution
+    X_pos = 0.05 * rng.normal(size=(20, d)) + 2.0 * true_dir
+    X_neg = 0.05 * rng.normal(size=(20, d)) - 2.0 * true_dir
+    tok_X_pos = 0.50 * rng.normal(size=(100, d)) + 1.0 * true_dir
+    tok_X_neg = 0.50 * rng.normal(size=(100, d)) - 1.0 * true_dir
+
+    cal = calibrate_hyperplane_from_activations(
+        X_pos,
+        X_neg,
+        concept="profanity",
+        layer_idx=1,
+        estimator="pca",
+        target_offset_sigma=0.5,
+        token_X_pos=tok_X_pos,
+        token_X_neg=tok_X_neg,
+    )
+    assert abs(cal.mu_pos - 1.0) < 0.25
+    assert cal.sigma_pos > 0.25
+    assert cal.s_l > cal.mu_pos
+
+    # Requesting n_calib=100 when sample_pairs only has 12 per concept records capped n_calib_effective=12
+    dirs, rep = extract_or_load_directions(
+        model=dummy_lm,
+        tokenizer=dummy_tokenizer,
+        model_alias="tiny_llama",
+        quant="fp32",
+        pairs=sample_pairs,
+        concepts=["profanity"],
+        layer_indices=[1],
+        artifact_dir=tmp_path / "artifacts",
+        target_offset_sigma=0.5,
+        n_calib=100,
+    )
+    assert rep.stages[0].examples == 12
+    assert rep.stages[0].extra["n_calib_requested"] == 100
+    assert rep.stages[0].extra["n_calib_effective"] == 12
+
+    # Cached reload with new target_offset_sigma must recompute s_l
+    dirs_reloaded, rep_cached = extract_or_load_directions(
+        model=dummy_lm,
+        tokenizer=dummy_tokenizer,
+        model_alias="tiny_llama",
+        quant="fp32",
+        pairs=sample_pairs,
+        concepts=["profanity"],
+        layer_indices=[1],
+        artifact_dir=tmp_path / "artifacts",
+        target_offset_sigma=1.5,
+        n_calib=100,
+    )
+    assert rep_cached.cached is True
+    assert dirs_reloaded[0].s_l > dirs[0].s_l

@@ -162,11 +162,17 @@ class LLMJudge:
             raise ValueError(f"LLMJudge requires backend 'vllm' or 'hf', got {self.backend!r}")
 
     def _format_user_prompt(self, row: dict, strict_retry: bool = False) -> str:
+        ref = row.get("reference_safe")
+        ref_str = "None" if (ref is None or pd.isna(ref) or not str(ref).strip()) else str(ref)
+        pr = row.get("prompt")
+        pr_str = "" if (pr is None or pd.isna(pr)) else str(pr)
+        resp = row.get("text")
+        resp_str = "" if (resp is None or pd.isna(resp)) else str(resp)
         body = self.rubric_template.format(
-            prompt=str(row.get("prompt") or ""),
+            prompt=pr_str,
             label_unsafe=bool(row.get("label_unsafe", False)),
-            reference_safe=str(row.get("reference_safe") or "None"),
-            response=str(row.get("text") or ""),
+            reference_safe=ref_str,
+            response=resp_str,
         )
         if strict_retry:
             body += "\nIMPORTANT: Return ONLY one valid JSON object and nothing else."

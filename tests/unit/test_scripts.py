@@ -26,6 +26,7 @@ def test_shell_scripts_syntax_valid():
         REPO_ROOT / "scripts" / "run_autopilot.sh",
         REPO_ROOT / "scripts" / "activate.sh",
         REPO_ROOT / "scripts" / "remote.sh",
+        REPO_ROOT / "scripts" / "restart_remote.sh",
         REPO_ROOT / "scripts" / "install_git_hooks.sh",
         REPO_ROOT / "scripts" / "slurm" / "run_grid.sbatch",
     ]
@@ -88,6 +89,8 @@ def test_remote_script_dry_run_subcommands(tmp_path: Path):
         (["check-gates", "gpu_lab1"], ["rsync", "ssh", "download_models.py", "--check-gates", "gpu_lab1"]),
         (["run", "main", "gpu_80gb"], ["rsync", "ssh", "run_phase.sh", "main", "gpu_80gb"]),
         (["run", "main", "gpu_80gb", "--detach"], ["rsync", "ssh", "tmux", "minorsafe_main"]),
+        (["stop"], ["ssh", "tmux kill-session", ".minorsafe.lock"]),
+        (["reset"], ["ssh", "tmux kill-session", "data/processed", "results/runs"]),
         (["status"], ["ssh", "minorsafe.cli status", "nvidia-smi", "latest.log"]),
         (["info"], ["ssh", "nvidia-smi", "df -h"]),
         (["test-all", "gpu_lab1"], ["rsync", "ssh", "run_all_tests.sh", "CUDA_VISIBLE_DEVICES=0"]),
@@ -219,3 +222,23 @@ def test_run_autopilot_dry_run():
         "scripts/run_msba.sh gpu_lab1 --skip-quant",
     ):
         assert expected in res.stdout, f"Missing {expected!r} in:\n{res.stdout}"
+
+
+def test_restart_remote_dry_run(tmp_path: Path):
+    env_file = tmp_path / ".remote.env"
+    env_file.write_text('REMOTE_HOST="10.0.0.1"\nREMOTE_USER="vitaly"\n', encoding="utf-8")
+    env_file.chmod(0o600)
+
+    script = REPO_ROOT / "scripts" / "restart_remote.sh"
+    res = subprocess.run(
+        ["bash", str(script), "gpu_lab1"],
+        env={**os.environ, "DRY_RUN": "1", "REMOTE_ENV_FILE": str(env_file)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, res.stderr + res.stdout
+    unescaped = res.stdout.replace("\\", "")
+    assert "tmux kill-session" in unescaped
+    assert "data/processed" in unescaped
+    assert "run_autopilot.sh 'gpu_lab1' --with-tomography" in unescaped

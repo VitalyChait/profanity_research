@@ -16,6 +16,8 @@ set -euo pipefail
 #   autopilot [profile] [flags]  Sync, validate setup/preflight/HF gates, then launch full unattended sequence in background
 #   run <phase> [profile] [--detach]
 #                                Sync and execute a phase via scripts/run_phase.sh (optionally in tmux/nohup)
+#   stop                         Stop running remote MinorSafe tmux sessions/processes and clear locks
+#   reset [--keep-data]          Stop remote jobs and wipe stale runs/tomography/pilot (and data/processed)
 #   status                       Show remote live status, autopilot state, GPU utilization, and log tail
 #   logs                         Stream remote results/logs/latest.log
 #   pull                         Rsync results/ back from the remote server (excluding weights)
@@ -240,6 +242,33 @@ remote_env_prefix() {
     echo "${parts};"
 }
 
+_remote_stop_cmd() {
+    cat <<EOF
+set +e
+if command -v tmux >/dev/null 2>&1; then
+    for sess in \$(tmux ls -F '#{session_name}' 2>/dev/null | grep -E '^minorsafe_' || true); do
+        tmux kill-session -t "\${sess}" 2>/dev/null || true
+        echo "[remote] Killed tmux session \${sess}"
+    done
+fi
+PATTERN='[r]un_autopilot\.sh|[m]inorsafe\.cli|[r]un_msba\.sh|[r]un_all_tests\.sh|[r]un_phase\.sh|[V]LLM::EngineCore|[v]llm\.worker'
+SELF_PID="\$\$"
+PIDS="\$(pgrep -u "\$(whoami)" -f "\${PATTERN}" 2>/dev/null | grep -vx "\${SELF_PID}" || true)"
+if [ -n "\${PIDS}" ]; then
+    echo "[remote] Stopping PIDs: \${PIDS}"
+    kill -TERM \${PIDS} 2>/dev/null || true
+    sleep 3
+    REM="\$(pgrep -u "\$(whoami)" -f "\${PATTERN}" 2>/dev/null | grep -vx "\${SELF_PID}" || true)"
+    if [ -n "\${REM}" ]; then
+        kill -KILL \${REM} 2>/dev/null || true
+        sleep 1
+    fi
+fi
+rm -f '${REMOTE_DIR}/.minorsafe.lock' '${REMOTE_DIR}/results/logs/autopilot.pid'
+echo "[remote] Remote MinorSafe processes stopped and locks cleared."
+EOF
+}
+
 case "${SUBCMD}" in
     info)
         # Inspect full disk mounts, RAM, CPU cores, OS, CUDA/uv/tmux, and HF cache on remote host.
@@ -448,6 +477,32 @@ EOF
         fi
         ;;
 
+    stop)
+        run_ssh "$(_remote_stop_cmd)"
+        ;;
+
+    reset)
+        KEEP_DATA=0
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --keep-data) KEEP_DATA=1 ;;
+                *)
+                    echo "Unknown reset option: $1" >&2
+                    echo "Usage: bash scripts/remote.sh reset [--keep-data]" >&2
+                    exit 1
+                    ;;
+            esac
+            shift
+        done
+        RESET_CMD="$(_remote_stop_cmd)"
+        RESET_CMD+=$'\n'"rm -rf '${REMOTE_DIR}/results/runs' '${REMOTE_DIR}/results/tomography' '${REMOTE_DIR}/results/pilot_archive' '${REMOTE_DIR}/results/REPORT.md' '${REMOTE_DIR}/results/cost_table.csv' '${REMOTE_DIR}/results/summary.parquet' '${REMOTE_DIR}/results/figures' '${REMOTE_DIR}/results/tables'"
+        if [[ "${KEEP_DATA}" == "0" ]]; then
+            RESET_CMD+=$'\n'"rm -rf '${REMOTE_DIR}/data/processed' '${REMOTE_DIR}/results/data_card.md' '${REMOTE_DIR}/results/data_synth_setup.json'"
+        fi
+        RESET_CMD+=$'\n'"echo '[remote] Cleared stale remote experiment artifacts (logs and HF cache preserved).'"
+        run_ssh "${RESET_CMD}"
+        ;;
+
     status)
         run_ssh "cd '${REMOTE_DIR}' && ( .venv/bin/python -m minorsafe.cli status || true ) && echo '--- autopilot ---' && ( [ -f results/logs/autopilot.status ] && cat results/logs/autopilot.status || echo 'no autopilot status' ) && echo '--- tmux ---' && ( tmux ls 2>/dev/null || echo 'no tmux sessions' ) && echo '--- background procs ---' && ( pgrep -af '[r]un_autopilot\.sh|[m]inorsafe\.cli|[r]un_msba\.sh|[r]un_all_tests\.sh|[r]un_phase\.sh' || echo 'no detached minorsafe procs' ) && echo '--- GPUs ---' && ( nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader 2>/dev/null || echo 'no nvidia-smi' ) && echo '--- latest log ---' && ( [ -f results/logs/latest.log ] && tail -n 15 results/logs/latest.log || echo 'no logs yet' )"
         ;;
@@ -581,7 +636,7 @@ EOF
 
     *)
         echo "Unknown subcommand: ${SUBCMD}" >&2
-        echo "Valid subcommands: info check users setup-ssh-key sync setup preflight gpu-test test-all autopilot run status logs pull" >&2
+        echo "Valid subcommands: info check users setup-ssh-key sync setup preflight gpu-test test-all autopilot run stop reset status logs pull" >&2
         exit 1
         ;;
 esac

@@ -46,6 +46,32 @@ def _logit_lens_tokens(
     return [_tok_str(i) for i in top_pos], [_tok_str(i) for i in top_neg]
 
 
+def _split_concept_pairs(
+    pairs: list[ContrastivePair],
+    eval_pairs: list[ContrastivePair] | None,
+    concept: str,
+    n_calib: int,
+) -> tuple[list[ContrastivePair], list[ContrastivePair], str]:
+    """Select training and held-out evaluation pairs for out-of-sample tomography AUROC."""
+    if eval_pairs is not None:
+        c_train = [p for p in pairs if p.concept == concept][:n_calib]
+        c_eval = [p for p in eval_pairs if p.concept == concept][:n_calib]
+        mode = "heldout_eval" if c_eval else "insample_fallback"
+        return c_train, c_eval, mode
+
+    c_all = [p for p in pairs if p.concept == concept]
+    calib_sub = [p for p in c_all if p.split == "calib"]
+    eval_sub = [p for p in c_all if p.split in ("dev", "test")]
+    if calib_sub and eval_sub:
+        return calib_sub[:n_calib], eval_sub[:n_calib], "heldout_eval"
+
+    c_pool = c_all[:n_calib]
+    if len(c_pool) >= 4:
+        split_idx = min(len(c_pool) - 1, max(2, int(round(0.75 * len(c_pool)))))
+        return c_pool[:split_idx], c_pool[split_idx:], "heldout_75_25"
+    return c_pool, [], "insample_fallback"
+
+
 def run_latent_tomography(
     model,
     tokenizer,
@@ -53,26 +79,41 @@ def run_latent_tomography(
     concepts: list[str] | None = None,
     top_k_tokens: int = 10,
     n_calib: int = 40,
+    eval_pairs: list[ContrastivePair] | None = None,
 ) -> dict:
-    """Compute layer-wise AUROC, cross-concept cosine similarity matrices, and Logit Lens vocabulary projections."""
+    """Compute layer-wise out-of-sample AUROC, cross-concept cosine matrices, and Logit Lens."""
     concepts = concepts or ["profanity", "lexical_complexity", "slang_toxic", "slang_benign"]
     layers = get_decoder_layers(model)
     layer_indices = list(range(len(layers)))
 
     dirs_by_concept_layer: dict[str, dict[int, object]] = {c: {} for c in concepts}
+    auroc_modes: dict[str, str] = {}
     for c in concepts:
-        c_pairs = [p for p in pairs if p.concept == c][:n_calib]
-        if not c_pairs:
+        c_train, c_eval, auroc_mode = _split_concept_pairs(pairs, eval_pairs, c, n_calib)
+        if not c_train:
             available = sorted({p.concept for p in pairs})
             raise ValueError(
                 f"No pairs for tomography concept {c!r} (available: {available}). "
                 "Refusing to fall back to other concepts' pairs."
             )
-        acts, _ = capture_pair_activations(model, tokenizer, c_pairs, layer_indices=layer_indices)
+        auroc_modes[c] = auroc_mode
+        acts, _ = capture_pair_activations(model, tokenizer, c_train, layer_indices=layer_indices)
+        eval_acts = (
+            capture_pair_activations(model, tokenizer, c_eval, layer_indices=layer_indices)[0]
+            if c_eval
+            else {}
+        )
         for l_idx in layer_indices:
             xp, xn = acts[l_idx]
+            ev_xp, ev_xn = eval_acts.get(l_idx, (None, None))
             dirs_by_concept_layer[c][l_idx] = calibrate_hyperplane_from_activations(
-                xp, xn, concept=c, layer_idx=l_idx, estimator="pca"
+                xp,
+                xn,
+                concept=c,
+                layer_idx=l_idx,
+                estimator="pca",
+                eval_X_pos=ev_xp,
+                eval_X_neg=ev_xn,
             )
 
     layer_reports = []
@@ -119,6 +160,7 @@ def run_latent_tomography(
     return {
         "num_layers": len(layers),
         "concepts": list(concepts),
+        "auroc_eval_modes": auroc_modes,
         "layers": layer_reports,
         "summary": {
             "mean_mid_profanity_slang_benign_cos": float(np.mean(prof_slang_cos)) if prof_slang_cos else 0.0,
@@ -148,7 +190,9 @@ def run_tomography_for_profile(
     pairs_path = base_data / "processed" / "pairs.parquet"
     if not pairs_path.exists():
         build_dataset(load_data_spec(), data_dir=base_data, results_dir=RESULTS_DIR, offline=True)
-    calib_pairs = [p for p in load_pairs(pairs_path) if p.split == "calib"]
+    all_pairs = load_pairs(pairs_path)
+    calib_pairs = [p for p in all_pairs if p.split == "calib"]
+    eval_pairs = [p for p in all_pairs if p.split in ("dev", "test")]
 
     written: list[Path] = []
     summaries: list[dict] = []
@@ -164,6 +208,7 @@ def run_tomography_for_profile(
                 pairs=calib_pairs,
                 concepts=concepts,
                 n_calib=n_calib,
+                eval_pairs=eval_pairs if eval_pairs else None,
             )
             report["model"] = alias
             report["family"] = spec.family

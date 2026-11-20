@@ -91,13 +91,19 @@ class GuardResponseMethod(ResponseMethod):
             setup_key=f"{self.name}_{self.guard_arch}_{self.train_mode}_{n_calib}_cpu_fixture",
         )
         if self.guard_arch == "encoder" and self.train_mode == "finetuned":
-            with rep.stage("train_encoder_head", examples=n_calib) as st:
+            pairs_sub = ctx.calib_pairs[:n_calib]
+            ex_sub = ctx.calib_examples[:n_calib]
+            n_calib_effective = max(len(pairs_sub), len(ex_sub))
+            with rep.stage("train_encoder_head", examples=n_calib_effective) as st:
+                st.extra.update(
+                    {"n_calib_requested": int(n_calib), "n_calib_effective": int(n_calib_effective)}
+                )
                 texts: list[str] = []
                 labels: list[int] = []
-                for p in ctx.calib_pairs[:n_calib]:
+                for p in pairs_sub:
                     texts.extend([p.positive, p.negative])
                     labels.extend([0, 1])
-                for ex in ctx.calib_examples[:n_calib]:
+                for ex in ex_sub:
                     texts.append(ex.last_user)
                     labels.append(1 if ex.label_unsafe else 0)
                 if len(set(labels)) >= 2:

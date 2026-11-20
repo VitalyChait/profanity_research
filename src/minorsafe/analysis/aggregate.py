@@ -175,8 +175,28 @@ def aggregate_experiment_results(runs_dir: Path, out_dir: Path) -> pd.DataFrame:
         rdir = pq.parent
         setup_path = rdir / "setup.json"
         setup_data = read_json(setup_path) if setup_path.exists() else {}
-
         first = df.iloc[0]
+        method_params = _parse_params(first.get("method_params", "{}"))
+        n_calib_req = method_params.get("n_calib")
+        n_calib_eff = None
+        stage_examples = None
+        for st in setup_data.get("stages", []):
+            if not isinstance(st, dict):
+                continue
+            if stage_examples is None and st.get("examples"):
+                stage_examples = int(st["examples"])
+            extra = st.get("extra")
+            if isinstance(extra, dict) and "n_calib_effective" in extra:
+                n_calib_eff = int(extra["n_calib_effective"])
+                if "n_calib_requested" in extra:
+                    n_calib_req = int(extra["n_calib_requested"])
+                break
+        if n_calib_eff is None:
+            if stage_examples is not None:
+                n_calib_eff = stage_examples
+            elif n_calib_req is not None:
+                n_calib_eff = int(n_calib_req)
+
         clusters = df["example_id"].astype(str).tolist() if "example_id" in df.columns else None
 
         succ_mean, succ_lo, succ_hi = _stat(df, "success", clusters)
@@ -265,6 +285,8 @@ def aggregate_experiment_results(runs_dir: Path, out_dir: Path) -> pd.DataFrame:
                 "quant": str(first.get("quant", "bf16")),
                 "age_band": str(first.get("age_band", "teen_12_18")),
                 "n_queries": int(len(df)),
+                "n_calib_requested": float(n_calib_req) if n_calib_req is not None else float("nan"),
+                "n_calib_effective": float(n_calib_eff) if n_calib_eff is not None else float("nan"),
                 "setup_wall_s": float(setup_data.get("total_wall_s", 0.0)),
                 "setup_gpu_s": float(setup_data.get("total_gpu_s", 0.0)),
                 "setup_tokens": int(setup_data.get("total_tokens", 0)),

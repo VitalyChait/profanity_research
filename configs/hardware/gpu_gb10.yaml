@@ -26,7 +26,7 @@ encoder_guards:
   - modernbert_base
 encoder_mlms:
   - modernbert_base_mlm
-teacher: llama33_70b_awq
+teacher: qwen25_3b_teacher
 teacher_backend: vllm
 lora_large_mode: lora
 use_vllm: true

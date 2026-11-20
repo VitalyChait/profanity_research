@@ -11,6 +11,7 @@ from datasketch import MinHash, MinHashLSH
 from minorsafe.config import ModelSpec, load_prompts
 from minorsafe.data.lexicons import find_profanity_spans, is_english
 from minorsafe.data.minimal_pairs import build_minimal_pairs
+from minorsafe.data.neologisms import build_procedural_neologism_pairs
 from minorsafe.data.obfuscation import detect_obfuscated_profanity
 from minorsafe.data.schema import ContrastivePair
 from minorsafe.data.sources import load_seed_pairs
@@ -76,8 +77,16 @@ def filter_contrastive_pairs(
                 neg_has_lex = bool(
                     find_profanity_spans(p.negative) or detect_obfuscated_profanity(p.negative)
                 )
+                neo_term = (
+                    str(p.meta.get("neologism_term") or "").strip().lower()
+                    if isinstance(p.meta, dict) and p.meta.get("neologism")
+                    else ""
+                )
+                neg_has_neo = bool(
+                    neo_term and neo_term in p.negative.lower() and neo_term not in p.positive.lower()
+                )
                 neg_tox = compute_safety_metrics(p.negative, backend="detoxify")["toxicity_score"]
-                if not neg_has_lex and neg_tox <= 0.45:
+                if not neg_has_lex and not neg_has_neo and neg_tox <= 0.45:
                     stats["dropped_negative_weak"] += 1
                     continue
 
@@ -107,37 +116,20 @@ def filter_contrastive_pairs(
     return kept, stats
 
 
-def _generate_teacher_pairs(
-    concepts: list[str],
-    pairs_per_concept: int,
-    oversample: float,
+def generate_teacher_texts(
+    prompts: list[str],
     teacher_spec: ModelSpec,
     teacher_backend: str,
     device: str = "cuda",
     vllm_gpu_memory_utilization: float = 0.85,
     seed: int = 13,
-) -> tuple[list[ContrastivePair], int]:
-    """Synthesize contrastive pairs using the configured teacher LLM via vLLM or HF."""
-    templates = load_prompts().get("synth_pair_templates", {})
+    max_tokens: int = 512,
+) -> list[tuple[str, int, int]]:
+    """Run batched generation over ``prompts`` using a teacher LLM via vLLM or HF."""
+    if not prompts:
+        return []
+
     quant = "awq" if "awq" in teacher_spec.hf_id.lower() else ("bf16" if device == "cuda" else "fp32")
-    n_req_per_concept = max(1, int(round(pairs_per_concept * oversample)))
-
-    prompts_meta: list[tuple[str, str]] = []
-    for concept in concepts:
-        tpl = templates.get(concept)
-        if not tpl:
-            continue
-        for k in range(n_req_per_concept):
-            user_prompt = (
-                f"{tpl}\n\n"
-                f"Generate a fresh, realistic, unique example #{k + 1} (avoid repeating common cliches). "
-                "Output ONLY the JSON object."
-            )
-            prompts_meta.append((concept, user_prompt))
-
-    if not prompts_meta:
-        return [], 0
-
     raw_outputs: list[tuple[str, int, int]] = []
     if teacher_backend == "vllm":
         from vllm import LLM, SamplingParams
@@ -153,7 +145,7 @@ def _generate_teacher_pairs(
         )
         try:
             rendered = []
-            for _, p in prompts_meta:
+            for p in prompts:
                 if getattr(tok, "chat_template", None):
                     try:
                         rendered.append(
@@ -167,7 +159,7 @@ def _generate_teacher_pairs(
                     except Exception:
                         pass
                 rendered.append(p)
-            params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=512)
+            params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=max_tokens)
             outs = llm.generate(rendered, params)
             for req_out in outs:
                 txt = req_out.outputs[0].text if req_out.outputs else ""
@@ -189,9 +181,9 @@ def _generate_teacher_pairs(
     elif teacher_backend == "hf":
         model, tok, _ = load_decoder(teacher_spec, quant=quant, device=device)
         try:
-            gen = ChatGenerator(model, tok, spec=teacher_spec, max_new_tokens=512, temperature=0.8)
-            for i in range(0, len(prompts_meta), 8):
-                chunk_msgs = [[{"role": "user", "content": p}] for _, p in prompts_meta[i : i + 8]]
+            gen = ChatGenerator(model, tok, spec=teacher_spec, max_new_tokens=max_tokens, temperature=0.8)
+            for i in range(0, len(prompts), 8):
+                chunk_msgs = [[{"role": "user", "content": p}] for p in prompts[i : i + 8]]
                 gens = gen.generate(chunk_msgs, seed=seed + i)
                 for g in gens:
                     raw_outputs.append((g.text, g.n_in, g.n_out + g.n_reasoning))
@@ -199,6 +191,48 @@ def _generate_teacher_pairs(
             free_model(model, tok)
     else:
         raise ValueError(f"Unsupported teacher_backend {teacher_backend!r}")
+    return raw_outputs
+
+
+def _generate_teacher_pairs(
+    concepts: list[str],
+    pairs_per_concept: int,
+    oversample: float,
+    teacher_spec: ModelSpec,
+    teacher_backend: str,
+    device: str = "cuda",
+    vllm_gpu_memory_utilization: float = 0.85,
+    seed: int = 13,
+) -> tuple[list[ContrastivePair], int]:
+    """Synthesize contrastive pairs using the configured teacher LLM via vLLM or HF."""
+    templates = load_prompts().get("synth_pair_templates", {})
+    n_req_per_concept = max(1, int(round(pairs_per_concept * oversample)))
+
+    prompts_meta: list[tuple[str, str]] = []
+    for concept in concepts:
+        tpl = templates.get(concept)
+        if not tpl:
+            continue
+        for k in range(n_req_per_concept):
+            user_prompt = (
+                f"{tpl}\n\n"
+                f"Generate a fresh, realistic, unique example #{k + 1} (avoid repeating common cliches). "
+                "Output ONLY the JSON object."
+            )
+            prompts_meta.append((concept, user_prompt))
+
+    if not prompts_meta:
+        return [], 0
+
+    raw_outputs = generate_teacher_texts(
+        prompts=[p for _, p in prompts_meta],
+        teacher_spec=teacher_spec,
+        teacher_backend=teacher_backend,
+        device=device,
+        vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+        seed=seed,
+        max_tokens=512,
+    )
 
     pairs: list[ContrastivePair] = []
     total_tokens = 0
@@ -239,12 +273,15 @@ def synthesize_contrastive_pairs(
     device: str = "cpu",
     vllm_gpu_memory_utilization: float = 0.85,
     toxicity_backend: str = "lexicon",
+    extra_pairs: list[ContrastivePair] | None = None,
+    extra_tokens: int = 0,
 ) -> tuple[list[ContrastivePair], SetupReport]:
     """Generate and validate contrastive pairs across requested concepts, logging SetupReport."""
     rep = setup_report or SetupReport(method="data_synth", setup_key=f"synth_{teacher_backend}_{seed}")
     with rep.stage("synth_pairs", examples=len(concepts) * pairs_per_concept) as st:
         minimal = build_minimal_pairs(max_pairs=pairs_per_concept * 2, seed=seed)
         seed_p = load_seed_pairs(max_items=pairs_per_concept * 3)
+        neo_p = build_procedural_neologism_pairs(max_pairs=pairs_per_concept * 2, seed=seed)
         teacher_p: list[ContrastivePair] = []
         if teacher_backend in ("vllm", "hf") and teacher_spec is not None:
             teacher_p, teacher_toks = _generate_teacher_pairs(
@@ -258,8 +295,11 @@ def synthesize_contrastive_pairs(
                 seed=seed,
             )
             st.tokens += teacher_toks
+        st.tokens += int(extra_tokens)
 
-        raw_pool = [p for p in (*minimal, *seed_p, *teacher_p) if p.concept in concepts]
+        raw_pool = [
+            p for p in (*minimal, *seed_p, *neo_p, *teacher_p, *(extra_pairs or ())) if p.concept in concepts
+        ]
         filtered, f_stats = filter_contrastive_pairs(raw_pool, toxicity_backend=toxicity_backend)
         log.info("Filtered contrastive pairs: %s", f_stats)
         if teacher_backend == "mock" or teacher_spec is None:

@@ -41,8 +41,17 @@ sources:
     enabled: true
     purpose: ["recomposition", "readability"]
 
-synth_pairs_per_concept: 500
+  - name: neologism_corpus
+    loader: load_neologism_corpus
+    max_items: 240
+    enabled: true
+    purpose: ["slang", "over_refusal", "safety"]
+
+synth_pairs_per_concept: 600
 synth_oversample: 2.5
+synth_teacher: qwen25_3b_teacher
+synth_neologism_examples: 160
+synth_neologism_pairs: 200
 concepts:
   - profanity
   - lexical_complexity

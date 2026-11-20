@@ -121,6 +121,9 @@ def cmd_preflight(
 def cmd_data_build(
     hardware: str = _hardware_option(),
     override: list[str] = typer.Option(None, "--override", "-o"),
+    teacher: str | None = typer.Option(
+        None, "--teacher", help="Override synthetic data teacher alias in models.yaml."
+    ),
     offline: bool = typer.Option(
         False, "--offline", help="Use only the built-in seed corpus (no HF downloads)."
     ),
@@ -133,6 +136,7 @@ def cmd_data_build(
         results_dir=RESULTS_DIR,
         offline=offline,
         hardware_profile=None if offline else hardware,
+        teacher_override=teacher,
     )
     typer.echo(f"Built {len(examples)} examples and {len(pairs)} pairs. Data card: {card_path}")
 

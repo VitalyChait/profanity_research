@@ -6,11 +6,16 @@ from pathlib import Path
 
 from minorsafe.config import ModelSpec
 from minorsafe.data.schema import ContrastivePair, Example
+from minorsafe.data.splits import stratified_subsample
 from minorsafe.eval.fluency import compute_fluency_metrics
 from minorsafe.eval.judge import heuristic_judge_score
 from minorsafe.eval.safety import compute_safety_metrics
 from minorsafe.generation import ChatGenerator
-from minorsafe.methods.steering.extract import calibrate_hyperplane_from_activations, capture_pair_activations
+from minorsafe.methods.steering.extract import (
+    calibrate_hyperplane_from_activations,
+    capture_pair_activations,
+    capture_pair_and_token_activations,
+)
 from minorsafe.methods.steering.hooks import ConceptDirection, ResidualSteeringHook
 from minorsafe.registry import get_decoder_layers
 from minorsafe.telemetry.cost import SetupReport
@@ -86,7 +91,7 @@ def sweep_steering_hyperparams(
     n_layers = len(layers)
     layer_by_depth = {d: max(0, min(n_layers - 1, int(round(d * (n_layers - 1))))) for d in rel_depths}
     unique_layers = sorted(set(layer_by_depth.values()))
-    dev_sub = dev_examples[: max(1, min(max_dev, len(dev_examples)))]
+    dev_sub = stratified_subsample(dev_examples, max(1, min(max_dev, len(dev_examples))), seed=13)
     msgs = [ex.messages() for ex in dev_sub]
     gen = ChatGenerator(model, tokenizer, spec=gen_spec, max_new_tokens=max_new_tokens, temperature=0.0)
 
@@ -111,15 +116,23 @@ def sweep_steering_hyperparams(
                 nuisance_by_layer[l_idx] = _compute_raw_direction(xp, xn, estimator="pca")
 
         acts_by_concept: dict[str, dict[int, tuple]] = {}
+        token_acts_by_concept: dict[str, dict[int, tuple]] = {}
         for c in concepts:
             c_pairs = [p for p in calib_pairs if p.concept == c][:n_calib]
             if not c_pairs:
                 raise ValueError(f"Sweep requires calibration pairs for concept {c!r}.")
-            acts, tok_c = capture_pair_activations(
-                model, tokenizer, c_pairs, layer_indices=unique_layers, pooling=pooling
-            )
+            if pooling == "mean_completion":
+                acts, tok_acts, tok_c = capture_pair_and_token_activations(
+                    model, tokenizer, c_pairs, layer_indices=unique_layers, pooling=pooling
+                )
+            else:
+                acts, tok_c = capture_pair_activations(
+                    model, tokenizer, c_pairs, layer_indices=unique_layers, pooling=pooling
+                )
+                tok_acts = {}
             st.tokens += tok_c
             acts_by_concept[c] = acts
+            token_acts_by_concept[c] = tok_acts
 
         candidates: list[dict] = []
         strengths = [(a, 0.5) for a in alphas] if mode == "swfc" else [(3.0, b) for b in offsets]
@@ -129,6 +142,7 @@ def sweep_steering_hyperparams(
                 dirs: list[ConceptDirection] = []
                 for c in concepts:
                     xp, xn = acts_by_concept[c][l_idx]
+                    tok_xp, tok_xn = token_acts_by_concept[c].get(l_idx, (None, None))
                     dirs.append(
                         calibrate_hyperplane_from_activations(
                             xp,
@@ -138,6 +152,8 @@ def sweep_steering_hyperparams(
                             estimator=estimator,
                             target_offset_sigma=offset_val,
                             nuisance_vector=nuisance_by_layer.get(l_idx),
+                            token_X_pos=tok_xp,
+                            token_X_neg=tok_xn,
                         )
                     )
                 hook = ResidualSteeringHook(directions=dirs, mode=mode, alpha=alpha_val, prefill=False)

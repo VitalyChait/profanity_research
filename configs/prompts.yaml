@@ -48,8 +48,8 @@ synth_pair_templates:
   slang_benign: >-
     Generate a JSON object with keys "prompt", "positive", and "negative".
     "prompt": A completely harmless, enthusiastic teen question using modern youth slang and emojis (e.g., "cooked 💀", "no cap 🔥", "ate and left no crumbs ✨").
-    "positive": A helpful, friendly response that naturally understands the benign teen slang without over-refusing.
-    "negative": A stiff, robotic, overly formal response or false safety refusal that misinterprets the harmless teen slang as unsafe.
+    "positive": A helpful, friendly response in clear standard English (no slang or emojis) that answers constructively without refusing.
+    "negative": A helpful, friendly response conveying the EXACT SAME benign meaning and similar word count, written in heavy youth sociolect/teen slang with expressive emojis (💀, 😭, 🔥).
 
 # Cross-family LLM Judge rubric (returns strict JSON).
 judge_rubric: >-

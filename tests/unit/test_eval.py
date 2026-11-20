@@ -8,12 +8,21 @@ import pandas as pd
 import pytest
 
 from minorsafe.eval.detection import compute_detection_metrics
-from minorsafe.eval.evaluate import compute_success_flag
+from minorsafe.eval.evaluate import compute_success_flag, evaluate_responses_df
 from minorsafe.eval.fluency import compute_fluency_metrics
-from minorsafe.eval.judge import compute_human_agreement, export_human_annotation_sheet, parse_judge_json
+from minorsafe.eval.judge import (
+    LLMJudge,
+    compute_human_agreement,
+    export_human_annotation_sheet,
+    parse_judge_json,
+)
 from minorsafe.eval.readability import compute_readability_metrics
 from minorsafe.eval.safety import compute_safety_metrics
-from minorsafe.eval.semantic import compute_recomposition_metrics, compute_sari
+from minorsafe.eval.semantic import (
+    compute_recomposition_metrics,
+    compute_recomposition_metrics_batch,
+    compute_sari,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -221,3 +230,84 @@ def test_judge_parsing_and_150_human_agreement(tmp_path: Path):
     assert agree["n_samples"] == 150
     assert agree["cohen_kappa_age_appropriate"] >= 0.95
     assert agree["spearman_rho_age_appropriate"] >= 0.95
+
+
+def test_eval_handles_parquet_nan_references(monkeypatch):
+    from minorsafe.config import EvalSettings, load_models
+
+    # Simulate Parquet NaN floats in reference_safe and baseline_m0_text
+    nan_val = float("nan")
+    batch_res = compute_recomposition_metrics_batch(
+        sources=["Explain how plants make food."],
+        predictions=["Plants use sunlight and water to make food."],
+        references=[nan_val],  # type: ignore[list-item]
+        baselines_m0=[nan_val],  # type: ignore[list-item]
+        bertscore_model=None,
+    )
+    assert len(batch_res) == 1
+    assert 0.0 <= batch_res[0]["bertscore_f1_ref"] <= 1.0
+
+    # Also verify BERTScorer path receives clean strings (no float('nan'))
+    seen_args: list[tuple[list[str], list[str]]] = []
+
+    class _FakeScorer:
+        def __init__(self, **_kwargs):
+            pass
+
+        def score(self, preds, refs, **_kwargs):
+            import torch
+
+            assert all(isinstance(p, str) for p in preds)
+            assert all(isinstance(r, str) for r in refs)
+            seen_args.append((list(preds), list(refs)))
+            t = torch.tensor([0.9] * len(preds))
+            return t, t, t
+
+    import sys
+    from types import SimpleNamespace
+
+    monkeypatch.setitem(sys.modules, "bert_score", SimpleNamespace(BERTScorer=_FakeScorer))
+    bert_res = compute_recomposition_metrics_batch(
+        sources=["Explain gravity simply."],
+        predictions=["Gravity pulls objects toward each other."],
+        references=[nan_val],  # type: ignore[list-item]
+        baselines_m0=[nan_val],  # type: ignore[list-item]
+        bertscore_model="roberta-large",
+        device="cpu",
+    )
+    assert bert_res[0]["bertscore_f1_ref"] == pytest.approx(0.9)
+    assert seen_args[0][1] == ["Explain gravity simply."]
+
+    # Verify LLMJudge._format_user_prompt maps NaN reference_safe to "None" instead of "nan"
+    judge = LLMJudge(load_models()["mistral_small_24b_awq"], backend="vllm")
+    formatted = judge._format_user_prompt(
+        {"prompt": "Hi", "text": "Hello!", "label_unsafe": False, "reference_safe": nan_val}
+    )
+    assert "Reference Safe Response: None" in formatted
+
+    # Full evaluate_responses_df with NaN reference_safe
+    df = pd.DataFrame(
+        [
+            {
+                "example_id": "e1",
+                "model": "qwen25_05b",
+                "quant": "bf16",
+                "seed": 0,
+                "prompt": "Explain water cycle.",
+                "text": "Water evaporates, forms clouds, and falls as rain.",
+                "label_unsafe": False,
+                "reference_safe": None,
+            }
+        ]
+    )
+    out = evaluate_responses_df(
+        df,
+        eval_settings=EvalSettings(
+            toxicity_backend="lexicon",
+            bertscore_model=None,
+            ppl_model=None,
+            judge_backend="heuristic",
+        ),
+    )
+    assert len(out) == 1
+    assert bool(out["success"].iloc[0]) is True

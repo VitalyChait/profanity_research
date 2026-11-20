@@ -6,6 +6,7 @@ params:
   pooling: mean_completion
   n_calib: 100
   layer_rel_depth: 0.50
+  use_sweep: true
   concepts:
     - profanity
     - lexical_complexity

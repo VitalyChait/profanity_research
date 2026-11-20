@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from wordfreq import zipf_frequency
 
+from minorsafe.data.neologisms import ALL_NEOLOGISM_TERMS
 from minorsafe.data.schema import nfc
 
 PROFANITY_TO_SAFE: dict[str, str] = {
@@ -209,7 +210,12 @@ def english_word_ratio(text: str) -> float:
     if not words:
         return 1.0
     known = sum(
-        1 for w in words if zipf_frequency(w, "en") >= 3.7 or w in PROFANITY_TO_SAFE or w in COMPLEX_TO_SIMPLE
+        1
+        for w in words
+        if zipf_frequency(w, "en") >= 3.7
+        or w in PROFANITY_TO_SAFE
+        or w in COMPLEX_TO_SIMPLE
+        or w in ALL_NEOLOGISM_TERMS
     )
     return known / len(words)
 

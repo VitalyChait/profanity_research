@@ -7,6 +7,7 @@ from pathlib import Path
 
 from minorsafe.config import DataSpec, load_data_spec, load_hardware, load_models
 from minorsafe.data.lexicons import is_english
+from minorsafe.data.neologisms import synthesize_neologism_data_with_llm
 from minorsafe.data.obfuscation import generate_obfuscated_examples
 from minorsafe.data.schema import ContrastivePair, Example, save_examples, save_pairs
 from minorsafe.data.sources import load_all_sources
@@ -84,6 +85,7 @@ def build_dataset(
     results_dir: str | Path | None = None,
     offline: bool = True,
     hardware_profile: str | None = None,
+    teacher_override: str | None = None,
 ) -> tuple[list[Example], list[ContrastivePair], Path]:
     """Build processed examples.parquet, pairs.parquet, and results/data_card.md."""
     spec = spec or load_data_spec()
@@ -97,7 +99,6 @@ def build_dataset(
         per_sentence=spec.obfuscation_per_sentence,
         seed=spec.seed,
     )
-    all_examples = assign_splits([*english_examples, *obf_examples], ratios=spec.split_ratios, seed=spec.seed)
 
     teacher_spec = None
     teacher_backend = "mock"
@@ -110,9 +111,31 @@ def build_dataset(
         device = hw.device
         vllm_util = hw.vllm_gpu_memory_utilization
         tox_backend = hw.eval.toxicity_backend
-        if hw.teacher:
+        teacher_alias = teacher_override or spec.synth_teacher or hw.teacher
+        if teacher_alias:
             models = load_models()
-            teacher_spec = models.get(hw.teacher)
+            if teacher_override and teacher_alias not in models:
+                raise KeyError(f"Unknown teacher alias {teacher_alias!r} in models.yaml")
+            teacher_spec = models.get(teacher_alias)
+
+    neo_examples: list[Example] = []
+    neo_pairs: list[ContrastivePair] = []
+    neo_tokens = 0
+    if not offline and teacher_spec is not None and teacher_backend in ("vllm", "hf"):
+        neo_examples, neo_pairs, neo_tokens = synthesize_neologism_data_with_llm(
+            teacher_spec=teacher_spec,
+            teacher_backend=teacher_backend,
+            n_examples=spec.synth_neologism_examples,
+            n_pairs=spec.synth_neologism_pairs,
+            device=device,
+            vllm_gpu_memory_utilization=vllm_util,
+            seed=spec.seed,
+        )
+        neo_examples = [e for e in neo_examples if is_english(e.last_user, min_ratio=spec.english_min_ratio)]
+
+    all_examples = assign_splits(
+        [*english_examples, *obf_examples, *neo_examples], ratios=spec.split_ratios, seed=spec.seed
+    )
 
     raw_pairs, synth_rep = synthesize_contrastive_pairs(
         concepts=spec.concepts,
@@ -124,6 +147,8 @@ def build_dataset(
         device=device,
         vllm_gpu_memory_utilization=vllm_util,
         toxicity_backend=tox_backend,
+        extra_pairs=neo_pairs,
+        extra_tokens=neo_tokens,
     )
     all_pairs = assign_splits(raw_pairs, ratios=spec.pair_split_ratios, seed=spec.seed)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 
 from minorsafe.data.lexicons import find_complex_spans, find_profanity_spans
@@ -115,6 +116,13 @@ def compute_bertscore_batch(
         free_model(scorer)
 
 
+def _clean_opt_str(val: object) -> str:
+    """Convert None / NaN / non-string values cleanly to a stripped string ('' when absent)."""
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return ""
+    return str(val).strip()
+
+
 def compute_recomposition_metrics(
     source: str,
     prediction: str,
@@ -123,25 +131,27 @@ def compute_recomposition_metrics(
     bertscore_model: str | None = None,
 ) -> dict:
     """Compute BERTScore-F1 (or CPU token-F1 when bertscore_model is None), SARI, and filter accuracy."""
-    ref_txt = reference or source
-    m0_txt = baseline_m0 or source
+    src_txt = _clean_opt_str(source)
+    pred_txt = _clean_opt_str(prediction)
+    ref_txt = _clean_opt_str(reference) or src_txt
+    m0_txt = _clean_opt_str(baseline_m0) or src_txt
 
     if bertscore_model:
         bs_scores = compute_bertscore_batch(
-            [prediction, prediction], [ref_txt, m0_txt], bertscore_model=bertscore_model
+            [pred_txt, pred_txt], [ref_txt, m0_txt], bertscore_model=bertscore_model
         )
         bs_ref, bs_m0 = bs_scores[0], bs_scores[1]
     else:
-        bs_ref = _token_f1_similarity(prediction, ref_txt)
-        bs_m0 = _token_f1_similarity(prediction, m0_txt)
+        bs_ref = _token_f1_similarity(pred_txt, ref_txt)
+        bs_m0 = _token_f1_similarity(pred_txt, m0_txt)
 
-    sari = compute_sari(source, prediction, [ref_txt])
+    sari = compute_sari(src_txt, pred_txt, [ref_txt])
 
     # Target word filtering check: zero profane/obfuscated/complex target spans remaining in prediction
     has_bad_words = bool(
-        find_profanity_spans(prediction)
-        or detect_obfuscated_profanity(prediction)
-        or find_complex_spans(prediction)
+        find_profanity_spans(pred_txt)
+        or detect_obfuscated_profanity(pred_txt)
+        or find_complex_spans(pred_txt)
     )
     filter_acc = bool((not has_bad_words) and (bs_ref >= 0.70))
 
@@ -165,8 +175,10 @@ def compute_recomposition_metrics_batch(
     """Batched semantic evaluation across a whole shard using a single BERTScorer instance."""
     if not predictions:
         return []
-    ref_txts = [(r if r else s) for r, s in zip(references, sources, strict=True)]
-    m0_txts = [(m if m else s) for m, s in zip(baselines_m0, sources, strict=True)]
+    clean_srcs = [_clean_opt_str(s) for s in sources]
+    clean_preds = [_clean_opt_str(p) for p in predictions]
+    ref_txts = [_clean_opt_str(r) or s or " " for r, s in zip(references, clean_srcs, strict=True)]
+    m0_txts = [_clean_opt_str(m) or s or " " for m, s in zip(baselines_m0, clean_srcs, strict=True)]
 
     if bertscore_model:
         from bert_score import BERTScorer
@@ -180,19 +192,19 @@ def compute_recomposition_metrics_batch(
             batch_size=32,
         )
         try:
-            clean_preds = [p or " " for p in predictions]
-            _, _, f1_ref = scorer.score(clean_preds, [r or " " for r in ref_txts], verbose=False)
-            _, _, f1_m0 = scorer.score(clean_preds, [m or " " for m in m0_txts], verbose=False)
+            bert_preds = [p or " " for p in clean_preds]
+            _, _, f1_ref = scorer.score(bert_preds, ref_txts, verbose=False)
+            _, _, f1_m0 = scorer.score(bert_preds, m0_txts, verbose=False)
             bs_refs = [float(x) for x in f1_ref.tolist()]
             bs_m0s = [float(x) for x in f1_m0.tolist()]
         finally:
             free_model(scorer)
     else:
-        bs_refs = [_token_f1_similarity(p, r) for p, r in zip(predictions, ref_txts, strict=True)]
-        bs_m0s = [_token_f1_similarity(p, m) for p, m in zip(predictions, m0_txts, strict=True)]
+        bs_refs = [_token_f1_similarity(p, r) for p, r in zip(clean_preds, ref_txts, strict=True)]
+        bs_m0s = [_token_f1_similarity(p, m) for p, m in zip(clean_preds, m0_txts, strict=True)]
 
     out: list[dict] = []
-    for src, pred, ref, bs_ref, bs_m0 in zip(sources, predictions, ref_txts, bs_refs, bs_m0s, strict=True):
+    for src, pred, ref, bs_ref, bs_m0 in zip(clean_srcs, clean_preds, ref_txts, bs_refs, bs_m0s, strict=True):
         sari = compute_sari(src, pred, [ref])
         has_bad = bool(
             find_profanity_spans(pred) or detect_obfuscated_profanity(pred) or find_complex_spans(pred)

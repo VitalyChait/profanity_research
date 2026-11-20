@@ -364,3 +364,27 @@ llama33_70b_awq:
   gated: false
   quant_ids:
     awq: casperhansen/llama-3.3-70b-instruct-awq
+
+qwen25_3b_teacher:
+  hf_id: Qwen/Qwen2.5-3B-Instruct
+  arch: decoder
+  role: teacher
+  family: qwen
+  size_group: M
+  params_b: 3.09
+  gated: false
+  quant_ids:
+    awq: Qwen/Qwen2.5-3B-Instruct-AWQ
+  notes: "Fast, low-cost synthetic data and neologism teacher model."
+
+qwen25_7b_teacher:
+  hf_id: Qwen/Qwen2.5-7B-Instruct
+  arch: decoder
+  role: teacher
+  family: qwen
+  size_group: L
+  params_b: 7.62
+  gated: false
+  quant_ids:
+    awq: Qwen/Qwen2.5-7B-Instruct-AWQ
+  notes: "Alternative fast synthetic data teacher model."

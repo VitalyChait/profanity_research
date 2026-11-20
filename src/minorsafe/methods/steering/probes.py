@@ -19,6 +19,9 @@ from sklearn.linear_model import LogisticRegression
 from minorsafe.data.schema import ContrastivePair, Example
 from minorsafe.methods.steering.extract import capture_pair_activations, pooled_activations
 from minorsafe.telemetry.cost import SetupReport
+from minorsafe.utils import get_logger
+
+log = get_logger(__name__)
 
 
 class ResidualLinearProbe:
@@ -51,8 +54,16 @@ class ResidualLinearProbe:
         subset = pairs[:n_calib]
         if not subset:
             raise ValueError("No contrastive pairs available for probe calibration.")
+        if len(subset) < n_calib:
+            log.warning(
+                "Probe %s requested n_calib=%d pairs, but only %d available.",
+                method_name,
+                n_calib,
+                len(subset),
+            )
         rep = SetupReport(method=method_name, setup_key=f"probe_resp_L{self.layer_idx}_N{n_calib}")
         with rep.stage("fit_linear_probe", examples=len(subset)) as st:
+            st.extra.update({"n_calib_requested": int(n_calib), "n_calib_effective": len(subset)})
             acts, tok_cnt = capture_pair_activations(
                 model, tokenizer, subset, layer_indices=[self.layer_idx], pooling="mean_completion"
             )
@@ -72,8 +83,16 @@ class ResidualLinearProbe:
         subset = [e for e in examples if e.label_unsafe is not None][:n_calib]
         if not subset:
             raise ValueError("No labeled calibration examples available for prompt-level probe.")
+        if len(subset) < n_calib:
+            log.warning(
+                "Prompt probe %s requested n_calib=%d examples, but only %d available.",
+                method_name,
+                n_calib,
+                len(subset),
+            )
         rep = SetupReport(method=method_name, setup_key=f"probe_prompt_L{self.layer_idx}_N{n_calib}")
         with rep.stage("fit_linear_probe", examples=len(subset)) as st:
+            st.extra.update({"n_calib_requested": int(n_calib), "n_calib_effective": len(subset)})
             feats, labels = [], []
             for ex in subset:
                 acts, n_tok = pooled_activations(

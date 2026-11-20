@@ -99,8 +99,8 @@ def sample_pairs() -> list[ContrastivePair]:
             ContrastivePair(
                 concept="slang_benign",
                 prompt=f"Did you see play {i}?",
-                positive=f"That play {i} was fire 🔥 no cap, she totally aced it 💀!",
-                negative=f"That performance {i} was impressive without exaggeration, she succeeded.",
+                positive=f"That performance {i} was truly impressive without exaggeration, she succeeded completely.",
+                negative=f"That play {i} was straight fire 🔥 no cap, she totally aced it 💀!",
                 minimal=False,
                 split="calib",
             )

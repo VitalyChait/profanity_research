@@ -7,7 +7,7 @@ import argparse
 import os
 import sys
 
-from minorsafe.config import load_hardware, load_models
+from minorsafe.config import load_data_spec, load_hardware, load_models
 from minorsafe.hardware import resolve_profile_name
 
 
@@ -21,6 +21,10 @@ def collect_profile_models(profile_name: str) -> list[tuple[str, str, bool]]:
                 aliases.append(a)
     if hw.teacher and hw.teacher in models and hw.teacher not in aliases:
         aliases.append(hw.teacher)
+    if profile_name != "cpu_debug":
+        data_teacher = load_data_spec().synth_teacher
+        if data_teacher and data_teacher in models and data_teacher not in aliases:
+            aliases.append(data_teacher)
     if hw.eval.judge_model and hw.eval.judge_model in models and hw.eval.judge_model not in aliases:
         aliases.append(hw.eval.judge_model)
 

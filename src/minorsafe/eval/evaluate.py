@@ -30,6 +30,14 @@ def compute_success_flag(
     return bool((not is_refusal) and (helpful >= 3) and (meaning_preserved >= 3))
 
 
+def _opt_str(val: object) -> str | None:
+    """Convert Parquet NaN / None / empty string cleanly to None."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip()
+    return s or None
+
+
 def _build_m0_lookup(baseline_m0_df: pd.DataFrame | None) -> tuple[dict[tuple, str], dict[tuple, float]]:
     text_map: dict[tuple, str] = {}
     ppl_map: dict[tuple, float] = {}
@@ -43,7 +51,7 @@ def _build_m0_lookup(baseline_m0_df: pd.DataFrame | None) -> tuple[dict[tuple, s
             int(row.get("seed", 0)),
         )
         k_any_seed = (str(row.get("model", "")), str(row.get("quant", "")), str(row.get("example_id", "")))
-        txt = str(row.get("text") or "")
+        txt = _opt_str(row.get("text")) or ""
         text_map[k_exact] = txt
         text_map.setdefault(k_any_seed, txt)
         if "ppl" in row.index and pd.notna(row["ppl"]):
@@ -73,9 +81,9 @@ def evaluate_responses_df(
     records = df.to_dict(orient="records")
     m0_text_map, m0_ppl_map = _build_m0_lookup(baseline_m0_df)
 
-    texts = [str(r.get("text") or "") for r in records]
-    prompts = [str(r.get("prompt") or "") for r in records]
-    refs = [r.get("reference_safe") for r in records]
+    texts = [_opt_str(r.get("text")) or "" for r in records]
+    prompts = [_opt_str(r.get("prompt")) or "" for r in records]
+    refs = [_opt_str(r.get("reference_safe")) for r in records]
 
     baselines_m0: list[str | None] = []
     baseline_ppls: list[float | None] = []
@@ -87,12 +95,12 @@ def evaluate_responses_df(
             int(r.get("seed", 0)),
         )
         k_any = (str(r.get("model", "")), str(r.get("quant", "")), str(r.get("example_id", "")))
-        b_txt = r.get("baseline_m0_text") or m0_text_map.get(k_exact) or m0_text_map.get(k_any)
+        b_txt = _opt_str(r.get("baseline_m0_text")) or m0_text_map.get(k_exact) or m0_text_map.get(k_any)
         b_ppl = r.get("baseline_m0_ppl")
-        if b_ppl is None or (isinstance(b_ppl, float) and pd.isna(b_ppl)):
+        if b_ppl is None or pd.isna(b_ppl):
             b_ppl = m0_ppl_map.get(k_exact, m0_ppl_map.get(k_any))
-        baselines_m0.append(str(b_txt) if b_txt is not None else None)
-        baseline_ppls.append(float(b_ppl) if b_ppl is not None else None)
+        baselines_m0.append(b_txt)
+        baseline_ppls.append(float(b_ppl) if b_ppl is not None and not pd.isna(b_ppl) else None)
 
     saf_rows = compute_safety_metrics_batch(
         texts,

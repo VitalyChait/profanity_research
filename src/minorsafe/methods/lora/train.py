@@ -115,6 +115,13 @@ def train_lora_adapter(
     filtered = [p for p in calib_pairs if concept_set is None or p.concept in concept_set][:n_calib]
     if not filtered:
         raise ValueError(f"No calibration pairs available for LoRA training (concepts={concepts}).")
+    if len(filtered) < n_calib:
+        log.warning(
+            "LoRA %s requested n_calib=%d pairs, but only %d available.",
+            gen_spec.alias,
+            n_calib,
+            len(filtered),
+        )
 
     setup_key = f"lora_{gen_spec.alias}_{quant}_N{n_calib}_r{r}_ep{epochs}"
     adapter_dir = Path(artifact_dir) / setup_key
@@ -136,6 +143,7 @@ def train_lora_adapter(
 
     rep = SetupReport(method=method_name, setup_key=setup_key)
     with rep.stage("train_lora_adapter", examples=len(encoded) * max(1, epochs)) as st:
+        st.extra.update({"n_calib_requested": int(n_calib), "n_calib_effective": len(filtered)})
         if quant in ("int8", "nf4"):
             model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
 

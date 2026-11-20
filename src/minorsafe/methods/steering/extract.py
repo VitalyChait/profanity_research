@@ -15,7 +15,9 @@ from minorsafe.generation import format_chat
 from minorsafe.methods.steering.hooks import ConceptDirection
 from minorsafe.registry import get_decoder_layers
 from minorsafe.telemetry.cost import SetupReport
-from minorsafe.utils import read_json, stable_hash, write_json
+from minorsafe.utils import get_logger, read_json, stable_hash, write_json
+
+log = get_logger(__name__)
 
 
 def orthogonalize_vector(v_target: np.ndarray, v_nuisance: np.ndarray) -> np.ndarray:
@@ -69,18 +71,35 @@ def calibrate_hyperplane_from_activations(
     estimator: str = "pca",
     target_offset_sigma: float = 0.5,
     nuisance_vector: np.ndarray | None = None,
+    token_X_pos: np.ndarray | None = None,
+    token_X_neg: np.ndarray | None = None,
+    eval_X_pos: np.ndarray | None = None,
+    eval_X_neg: np.ndarray | None = None,
 ) -> ConceptDirection:
     """Compute unit steering vector and calibrate 1D logistic regression threshold m_l and target s_l."""
     v_norm = _compute_raw_direction(X_pos, X_neg, estimator="pca" if estimator in ("pca", "ortho") else "caa")
     if nuisance_vector is not None:
         v_norm = orthogonalize_vector(v_norm, nuisance_vector)
 
-    pos_proj = np.dot(X_pos, v_norm).astype(np.float64)
-    neg_proj = np.dot(X_neg, v_norm).astype(np.float64)
-    if np.mean(pos_proj) < np.mean(neg_proj):
+    pair_pos_proj = np.dot(X_pos, v_norm).astype(np.float64)
+    pair_neg_proj = np.dot(X_neg, v_norm).astype(np.float64)
+    if np.mean(pair_pos_proj) < np.mean(pair_neg_proj):
         v_norm = -v_norm
-        pos_proj = -pos_proj
-        neg_proj = -neg_proj
+        pair_pos_proj = -pair_pos_proj
+        pair_neg_proj = -pair_neg_proj
+
+    use_tokens = (
+        token_X_pos is not None and token_X_neg is not None and len(token_X_pos) > 0 and len(token_X_neg) > 0
+    )
+    if use_tokens:
+        tok_pos_proj = np.dot(token_X_pos, v_norm).astype(np.float64)
+        tok_neg_proj = np.dot(token_X_neg, v_norm).astype(np.float64)
+        if np.mean(tok_pos_proj) >= np.mean(tok_neg_proj):
+            pos_proj, neg_proj = tok_pos_proj, tok_neg_proj
+        else:
+            pos_proj, neg_proj = pair_pos_proj, pair_neg_proj
+    else:
+        pos_proj, neg_proj = pair_pos_proj, pair_neg_proj
 
     mu_pos = float(np.mean(pos_proj))
     sigma_pos = max(1e-4, float(np.std(pos_proj)))
@@ -93,7 +112,6 @@ def calibrate_hyperplane_from_activations(
     midpoint = 0.5 * (mu_pos + mu_neg)
     if np.std(X_all) < 1e-6:
         m_l = float(midpoint)
-        auroc = 0.5
     else:
         clf = LogisticRegression(fit_intercept=True, random_state=13)
         clf.fit(X_all, y_all)
@@ -106,8 +124,25 @@ def calibrate_hyperplane_from_activations(
             lo = min(mu_neg, mu_pos) - 3.0 * max(sigma_neg, sigma_pos)
             hi = max(mu_neg, mu_pos) + 3.0 * max(sigma_neg, sigma_pos)
             m_l = float(cand if lo <= cand <= hi else midpoint)
+
+    # Evaluate linear separability on held-out pairs when provided (avoids in-sample AUROC inflation).
+    use_eval = (
+        eval_X_pos is not None and eval_X_neg is not None and len(eval_X_pos) > 0 and len(eval_X_neg) > 0
+    )
+    if use_eval:
+        ev_pos = np.dot(eval_X_pos, v_norm).astype(np.float64)
+        ev_neg = np.dot(eval_X_neg, v_norm).astype(np.float64)
+        auroc_scores = np.concatenate([ev_pos, ev_neg])
+        auroc_y = np.array([1] * len(ev_pos) + [0] * len(ev_neg), dtype=int)
+    else:
+        auroc_scores = np.concatenate([pair_pos_proj, pair_neg_proj])
+        auroc_y = np.array([1] * len(pair_pos_proj) + [0] * len(pair_neg_proj), dtype=int)
+
+    if np.std(auroc_scores) < 1e-6 or len(np.unique(auroc_y)) < 2:
+        auroc = 0.5
+    else:
         try:
-            auroc = float(roc_auc_score(y_all, X_all.ravel()))
+            auroc = float(roc_auc_score(auroc_y, auroc_scores))
         except Exception:
             auroc = 0.5
 
@@ -140,16 +175,17 @@ def _encode_prompt_completion(tokenizer, prompt: str, completion: str) -> tuple[
     return prefix_ids + comp_ids, len(prefix_ids)
 
 
-@torch.no_grad()
-def pooled_activations(
+def _pooled_and_tokens_single_pass(
     model,
     tokenizer,
     prompt: str,
     completion: str,
     layer_indices: list[int],
     pooling: str = "mean_completion",
-) -> tuple[dict[int, np.ndarray], int]:
-    """Run one forward pass over (prompt, completion) and return pooled activations per layer + token count."""
+    collect_tokens: bool = False,
+    max_tokens_per_item: int = 32,
+) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray], int]:
+    """Run one forward pass over (prompt, completion) and return pooled and optional token activations."""
     layers = get_decoder_layers(model)
     cache: dict[int, torch.Tensor] = {}
     handles = []
@@ -175,7 +211,8 @@ def pooled_activations(
 
     n_tok = len(ids)
     start = min(n_prompt, max(0, n_tok - 1))
-    out: dict[int, np.ndarray] = {}
+    pooled_out: dict[int, np.ndarray] = {}
+    tokens_out: dict[int, np.ndarray] = {}
     for l_idx in layer_indices:
         h = cache[l_idx][0]  # [seq_len, hidden_dim]
         if pooling == "last_prompt_token":
@@ -186,8 +223,106 @@ def pooled_activations(
             vec = h[start:].mean(dim=0)
         else:
             raise ValueError(f"Unknown pooling mode: {pooling!r}")
-        out[l_idx] = vec.cpu().float().numpy()
-    return out, n_tok
+        pooled_out[l_idx] = vec.cpu().float().numpy()
+
+        if collect_tokens:
+            comp_h = h[start:] if start < h.shape[0] else h[-1:]
+            if comp_h.shape[0] > max_tokens_per_item:
+                sel = torch.linspace(0, comp_h.shape[0] - 1, steps=max_tokens_per_item, dtype=torch.long)
+                comp_h = comp_h[sel]
+            tokens_out[l_idx] = comp_h.cpu().float().numpy()
+
+    return pooled_out, tokens_out, n_tok
+
+
+@torch.no_grad()
+def pooled_activations(
+    model,
+    tokenizer,
+    prompt: str,
+    completion: str,
+    layer_indices: list[int],
+    pooling: str = "mean_completion",
+) -> tuple[dict[int, np.ndarray], int]:
+    """Run one forward pass over (prompt, completion) and return pooled activations per layer + token count."""
+    pooled_out, _, n_tok = _pooled_and_tokens_single_pass(
+        model, tokenizer, prompt, completion, layer_indices, pooling=pooling, collect_tokens=False
+    )
+    return pooled_out, n_tok
+
+
+def _capture_pair_activations_impl(
+    model,
+    tokenizer,
+    pairs: list[ContrastivePair],
+    layer_indices: list[int],
+    pooling: str = "mean_completion",
+    collect_tokens: bool = False,
+    max_tokens_per_item: int = 32,
+) -> tuple[dict[int, tuple[np.ndarray, np.ndarray]], dict[int, tuple[np.ndarray, np.ndarray]], int]:
+    """Capture pooled (X_pos, X_neg) and optional completion token-level activations per layer."""
+    if not pairs:
+        raise ValueError("capture_pair_activations requires at least one contrastive pair")
+    pos_by_layer: dict[int, list[np.ndarray]] = {l_idx: [] for l_idx in layer_indices}
+    neg_by_layer: dict[int, list[np.ndarray]] = {l_idx: [] for l_idx in layer_indices}
+    tok_pos_by_layer: dict[int, list[np.ndarray]] = {l_idx: [] for l_idx in layer_indices}
+    tok_neg_by_layer: dict[int, list[np.ndarray]] = {l_idx: [] for l_idx in layer_indices}
+    total_tokens = 0
+
+    for p in pairs:
+        for completion, p_dest, t_dest in (
+            (p.positive, pos_by_layer, tok_pos_by_layer),
+            (p.negative, neg_by_layer, tok_neg_by_layer),
+        ):
+            acts, tok_acts, n_tok = _pooled_and_tokens_single_pass(
+                model,
+                tokenizer,
+                p.prompt,
+                completion,
+                layer_indices,
+                pooling=pooling,
+                collect_tokens=collect_tokens,
+                max_tokens_per_item=max_tokens_per_item,
+            )
+            total_tokens += n_tok
+            for l_idx, vec in acts.items():
+                p_dest[l_idx].append(vec)
+                if collect_tokens:
+                    t_dest[l_idx].append(tok_acts[l_idx])
+
+    pooled_out = {
+        l_idx: (np.vstack(pos_by_layer[l_idx]), np.vstack(neg_by_layer[l_idx])) for l_idx in layer_indices
+    }
+    tok_out = (
+        {
+            l_idx: (np.vstack(tok_pos_by_layer[l_idx]), np.vstack(tok_neg_by_layer[l_idx]))
+            for l_idx in layer_indices
+        }
+        if collect_tokens
+        else {}
+    )
+    return pooled_out, tok_out, total_tokens
+
+
+@torch.no_grad()
+def capture_pair_and_token_activations(
+    model,
+    tokenizer,
+    pairs: list[ContrastivePair],
+    layer_indices: list[int],
+    pooling: str = "mean_completion",
+    max_tokens_per_item: int = 32,
+) -> tuple[dict[int, tuple[np.ndarray, np.ndarray]], dict[int, tuple[np.ndarray, np.ndarray]], int]:
+    """Capture pooled (X_pos, X_neg) and completion token-level (T_pos, T_neg) activations per layer."""
+    return _capture_pair_activations_impl(
+        model,
+        tokenizer,
+        pairs,
+        layer_indices,
+        pooling=pooling,
+        collect_tokens=True,
+        max_tokens_per_item=max_tokens_per_item,
+    )
 
 
 @torch.no_grad()
@@ -199,21 +334,10 @@ def capture_pair_activations(
     pooling: str = "mean_completion",
 ) -> tuple[dict[int, tuple[np.ndarray, np.ndarray]], int]:
     """Capture (X_pos, X_neg) activations for all requested layers in one pass per completion."""
-    if not pairs:
-        raise ValueError("capture_pair_activations requires at least one contrastive pair")
-    pos_by_layer: dict[int, list[np.ndarray]] = {l_idx: [] for l_idx in layer_indices}
-    neg_by_layer: dict[int, list[np.ndarray]] = {l_idx: [] for l_idx in layer_indices}
-    total_tokens = 0
-
-    for p in pairs:
-        for completion, dest in ((p.positive, pos_by_layer), (p.negative, neg_by_layer)):
-            acts, n_tok = pooled_activations(model, tokenizer, p.prompt, completion, layer_indices, pooling)
-            total_tokens += n_tok
-            for l_idx, vec in acts.items():
-                dest[l_idx].append(vec)
-
-    out = {l_idx: (np.vstack(pos_by_layer[l_idx]), np.vstack(neg_by_layer[l_idx])) for l_idx in layer_indices}
-    return out, total_tokens
+    pooled_out, _, total_tokens = _capture_pair_activations_impl(
+        model, tokenizer, pairs, layer_indices, pooling=pooling, collect_tokens=False
+    )
+    return pooled_out, total_tokens
 
 
 def extract_steering_directions(
@@ -236,7 +360,7 @@ def extract_steering_directions(
         layer_indices = [mid]
 
     report = SetupReport(method=f"steering_{estimator}", setup_key=f"steer_{estimator}_{n_calib}")
-    with report.stage("extract_vectors", examples=len(pairs)) as st:
+    with report.stage("extract_vectors", examples=0) as st:
         nuisance_by_layer: dict[int, np.ndarray] = {}
         if estimator == "ortho" and orthogonal_concept:
             slang_pairs = [p for p in pairs if p.concept == orthogonal_concept][:n_calib]
@@ -244,6 +368,13 @@ def extract_steering_directions(
                 raise ValueError(
                     f"estimator='ortho' needs calibration pairs for {orthogonal_concept!r}; none found. "
                     "Refusing to silently degrade to non-orthogonalized steering."
+                )
+            if len(slang_pairs) < n_calib:
+                log.warning(
+                    "Requested n_calib=%d for orthogonal concept %r, but only %d pairs available.",
+                    n_calib,
+                    orthogonal_concept,
+                    len(slang_pairs),
                 )
             slang_acts, tok_s = capture_pair_activations(
                 model, tokenizer, slang_pairs, layer_indices=layer_indices, pooling=pooling
@@ -253,6 +384,7 @@ def extract_steering_directions(
                 nuisance_by_layer[l_idx] = _compute_raw_direction(xp, xn, estimator="pca")
 
         chosen_directions: list[ConceptDirection] = []
+        per_concept_counts: dict[str, int] = {}
         for concept in concepts:
             c_pairs = [p for p in pairs if p.concept == concept][:n_calib]
             if not c_pairs:
@@ -261,14 +393,29 @@ def extract_steering_directions(
                     f"No calibration pairs for steering concept {concept!r} (available: {available}). "
                     "Refusing to fall back to other concepts' pairs, which would mislabel the direction."
                 )
-            acts, tok_c = capture_pair_activations(
-                model, tokenizer, c_pairs, layer_indices=layer_indices, pooling=pooling
-            )
+            per_concept_counts[concept] = len(c_pairs)
+            if len(c_pairs) < n_calib:
+                log.warning(
+                    "Requested n_calib=%d for concept %r, but only %d pairs available.",
+                    n_calib,
+                    concept,
+                    len(c_pairs),
+                )
+            if pooling == "mean_completion":
+                acts, token_acts, tok_c = capture_pair_and_token_activations(
+                    model, tokenizer, c_pairs, layer_indices=layer_indices, pooling=pooling
+                )
+            else:
+                acts, tok_c = capture_pair_activations(
+                    model, tokenizer, c_pairs, layer_indices=layer_indices, pooling=pooling
+                )
+                token_acts = {}
             st.tokens += tok_c
 
             best_cd: ConceptDirection | None = None
             for l_idx in layer_indices:
                 xp, xn = acts[l_idx]
+                tok_xp, tok_xn = token_acts.get(l_idx, (None, None))
                 cd = calibrate_hyperplane_from_activations(
                     xp,
                     xn,
@@ -277,11 +424,23 @@ def extract_steering_directions(
                     estimator=estimator,
                     target_offset_sigma=target_offset_sigma,
                     nuisance_vector=nuisance_by_layer.get(l_idx),
+                    token_X_pos=tok_xp,
+                    token_X_neg=tok_xn,
                 )
                 if best_cd is None or cd.separability_auroc >= best_cd.separability_auroc:
                     best_cd = cd
             if best_cd is not None:
                 chosen_directions.append(best_cd)
+
+        n_calib_effective = min(per_concept_counts.values()) if per_concept_counts else 0
+        st.examples = int(n_calib_effective)
+        st.extra.update(
+            {
+                "n_calib_requested": int(n_calib),
+                "n_calib_effective": int(n_calib_effective),
+                "per_concept_counts": per_concept_counts,
+            }
+        )
 
     return chosen_directions, report
 
@@ -383,7 +542,12 @@ def extract_or_load_directions(
     if artifact_dir is not None:
         cached = load_steering_artifact(artifact_dir, key)
         if cached is not None:
-            return cached
+            directions, rep = cached
+            for cd in directions:
+                cd.s_l = float(
+                    max(cd.mu_pos + target_offset_sigma * cd.sigma_pos, cd.m_l + 0.1 * cd.sigma_pos)
+                )
+            return directions, rep
 
     directions, rep = extract_steering_directions(
         model=model,

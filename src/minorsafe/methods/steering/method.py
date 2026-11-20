@@ -51,9 +51,16 @@ class SteeringResponseMethod(ResponseMethod):
         n_calib = int(self.spec.params.get("n_calib", 50))
         layers = get_decoder_layers(self.model, layers_path=ctx.generator_spec.layers_path)
         rel_depth = float(self.spec.params.get("layer_rel_depth", 0.50))
+        swept_best: dict | None = None
+        should_sweep = (
+            self.use_sweep
+            and self.mode != "probe_guard"
+            and bool(ctx.dev_examples)
+            and (not ctx.hardware.allow_placeholders or bool(self.spec.params.get("force_sweep", False)))
+        )
 
-        if self.use_sweep and self.mode != "probe_guard" and ctx.dev_examples:
-            best, _ = sweep_steering_hyperparams(
+        if should_sweep:
+            swept_best, _ = sweep_steering_hyperparams(
                 model=self.model,
                 tokenizer=self.tokenizer,
                 gen_spec=ctx.generator_spec,
@@ -67,9 +74,9 @@ class SteeringResponseMethod(ResponseMethod):
                 n_calib=n_calib,
                 artifact_dir=ctx.artifact_dir,
             )
-            rel_depth = float(best.get("layer_rel_depth", rel_depth))
-            self.alpha = float(best.get("alpha", self.alpha))
-            self.target_offset_sigma = float(best.get("target_offset_sigma", self.target_offset_sigma))
+            rel_depth = float(swept_best.get("layer_rel_depth", rel_depth))
+            self.alpha = float(swept_best.get("alpha", self.alpha))
+            self.target_offset_sigma = float(swept_best.get("target_offset_sigma", self.target_offset_sigma))
 
         target_layer = max(0, min(len(layers) - 1, int(round(rel_depth * (len(layers) - 1)))))
 
@@ -153,6 +160,8 @@ class SteeringResponseMethod(ResponseMethod):
             )
 
         rep.method = self.name
+        if swept_best is not None and rep.stages:
+            rep.stages[0].extra["swept_params"] = swept_best
         self.hook = ResidualSteeringHook(
             directions=directions,
             mode=self.mode,

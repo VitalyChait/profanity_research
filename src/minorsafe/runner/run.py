@@ -7,7 +7,6 @@ import gc
 import json
 import math
 import os
-import random
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +26,7 @@ from minorsafe.config import (
 )
 from minorsafe.data.build import build_dataset
 from minorsafe.data.schema import Example, load_examples, load_pairs
+from minorsafe.data.splits import stratified_subsample as _stratified_subsample
 from minorsafe.eval.capability import evaluate_capability_retention
 from minorsafe.eval.evaluate import evaluate_responses_df
 from minorsafe.eval.judge import export_human_annotation_sheet
@@ -36,35 +36,6 @@ from minorsafe.runner.grid import RunSpec, expand_experiment_grid, verify_split_
 from minorsafe.runner.store import RunStore
 from minorsafe.telemetry import GPUSampler, SmartRunLogger
 from minorsafe.utils import DATA_DIR, RESULTS_DIR, git_sha, package_versions, read_json, write_json
-
-
-def _stratified_subsample(examples: list[Example], max_examples: int, seed: int = 13) -> list[Example]:
-    """Deterministically round-robin across primary categories so rare subsets stay covered."""
-    if max_examples <= 0 or max_examples >= len(examples):
-        return examples
-    rng = random.Random(seed)
-    buckets: dict[str, list[Example]] = {}
-    for ex in examples:
-        cat = ex.categories[0] if ex.categories else "benign"
-        buckets.setdefault(cat, []).append(ex)
-    for items in buckets.values():
-        rng.shuffle(items)
-
-    chosen: list[Example] = []
-    keys = sorted(buckets.keys())
-    idx = 0
-    while len(chosen) < max_examples:
-        added_any = False
-        for k in keys:
-            if idx < len(buckets[k]):
-                chosen.append(buckets[k][idx])
-                added_any = True
-                if len(chosen) >= max_examples:
-                    break
-        if not added_any:
-            break
-        idx += 1
-    return chosen
 
 
 def _output_to_row(

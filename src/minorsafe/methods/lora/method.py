@@ -29,6 +29,7 @@ class LoRAResponseMethod(ResponseMethod):
         )
         pairs = ctx.calib_pairs[:n_calib]
         with rep.stage("train_lora_adapter", examples=len(pairs) * epochs) as st:
+            st.extra.update({"n_calib_requested": int(n_calib), "n_calib_effective": len(pairs)})
             dev = next(self.model.parameters()).device
             trainable = [p for p in self.model.parameters() if p.requires_grad]
             if trainable and pairs:

@@ -93,6 +93,18 @@ def generate_all_figures(
     # 4. Ramp-Up Efficiency (Setup Time vs Success)
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.scatter(df["setup_wall_s"] + 1.0, df["success_mean"], s=70, color="tab:orange")
+    if "n_calib_effective" in df.columns:
+        for _, r in df.iterrows():
+            n_eff = r.get("n_calib_effective")
+            if isinstance(n_eff, (int, float)) and np.isfinite(n_eff) and n_eff > 0:
+                ax.annotate(
+                    f"N={int(n_eff)}",
+                    (float(r["setup_wall_s"]) + 1.0, float(r["success_mean"])),
+                    textcoords="offset points",
+                    xytext=(4, 4),
+                    fontsize=6,
+                    alpha=0.8,
+                )
     ax.set_xscale("log")
     ax.set_xlabel("Ramp-Up Wall Time T_setup + 1 [s] (log)")
     ax.set_ylabel("Success Rate")

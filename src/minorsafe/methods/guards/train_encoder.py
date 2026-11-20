@@ -103,6 +103,20 @@ def train_encoder_guard(
             f"Encoder guard training for {model_spec.alias} requires both safe and unsafe examples; "
             f"got labels={set(labels)}."
         )
+    safety_pairs = [p for p in calib_pairs if p.concept in _SAFETY_PAIR_CONCEPTS]
+    labeled_calib = [ex for ex in calib_examples if ex.label_unsafe is not None]
+    n_pairs_used = min(len(safety_pairs), n_calib)
+    n_ex_used = min(len(labeled_calib), n_calib)
+    n_calib_effective = max(n_pairs_used, n_ex_used)
+    if n_calib_effective < n_calib:
+        log.warning(
+            "Encoder guard %s requested n_calib=%d, effective available=%d (pairs=%d, examples=%d).",
+            model_spec.alias,
+            n_calib,
+            n_calib_effective,
+            n_pairs_used,
+            n_ex_used,
+        )
 
     rep = SetupReport(method=f"m1_enc_{model_spec.alias}", setup_key=setup_key)
     model, tok, _ = load_encoder_classifier(model_spec, num_labels=2, device=device, quant=quant)
@@ -112,6 +126,14 @@ def train_encoder_guard(
     threshold = 0.50
     try:
         with rep.stage("train_encoder_head", examples=len(texts) * max(1, epochs)) as st:
+            st.extra.update(
+                {
+                    "n_calib_requested": int(n_calib),
+                    "n_calib_effective": int(n_calib_effective),
+                    "n_pairs_used": int(n_pairs_used),
+                    "n_examples_used": int(n_ex_used),
+                }
+            )
             enc = tok(
                 texts,
                 return_tensors="pt",

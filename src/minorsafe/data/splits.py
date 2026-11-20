@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 from typing import TypeVar
 
 from minorsafe.data.schema import ContrastivePair, Example
@@ -62,3 +63,32 @@ def check_split_leakage(items: list[Example | ContrastivePair]) -> int:
         k = _item_norm_key(item)
         key_splits.setdefault(k, set()).add(item.split)
     return sum(1 for splits in key_splits.values() if len(splits) > 1)
+
+
+def stratified_subsample(examples: list[Example], max_examples: int, seed: int = 13) -> list[Example]:
+    """Deterministically round-robin across primary categories so rare subsets stay covered."""
+    if max_examples <= 0 or max_examples >= len(examples):
+        return examples
+    rng = random.Random(seed)
+    buckets: dict[str, list[Example]] = {}
+    for ex in examples:
+        cat = ex.categories[0] if ex.categories else "benign"
+        buckets.setdefault(cat, []).append(ex)
+    for items in buckets.values():
+        rng.shuffle(items)
+
+    chosen: list[Example] = []
+    keys = sorted(buckets.keys())
+    idx = 0
+    while len(chosen) < max_examples:
+        added_any = False
+        for k in keys:
+            if idx < len(buckets[k]):
+                chosen.append(buckets[k][idx])
+                added_any = True
+                if len(chosen) >= max_examples:
+                    break
+        if not added_any:
+            break
+        idx += 1
+    return chosen

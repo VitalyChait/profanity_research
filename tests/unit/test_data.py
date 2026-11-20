@@ -14,6 +14,14 @@ from minorsafe.data.lexicons import (
     replace_profanity,
 )
 from minorsafe.data.minimal_pairs import build_minimal_pairs
+from minorsafe.data.neologisms import (
+    ALL_NEOLOGISM_TERMS,
+    BENIGN_NEOLOGISMS,
+    TOXIC_NEOLOGISMS,
+    build_procedural_neologism_examples,
+    build_procedural_neologism_pairs,
+    synthesize_neologism_data_with_llm,
+)
 from minorsafe.data.obfuscation import (
     apply_obfuscation,
     detect_obfuscated_profanity,
@@ -141,3 +149,76 @@ def test_deterministic_splits_and_zero_leakage():
     obf_examples = generate_obfuscated_examples(s1[:10], per_sentence=2, seed=13)
     assert len(obf_examples) >= 1
     assert all("obfuscated" in e.categories for e in obf_examples)
+
+
+def test_neologism_corpus_and_llm_synthesis(monkeypatch):
+    from minorsafe.config import load_models
+
+    assert len(BENIGN_NEOLOGISMS) >= 20
+    assert len(TOXIC_NEOLOGISMS) >= 20
+    assert {"zorbmaxxing", "kriffled", "chokemaxx"}.issubset(ALL_NEOLOGISM_TERMS)
+    assert is_english("Bro I got kriffled while zorbmaxxing 💀😭!!", min_ratio=0.6) is True
+
+    examples = build_procedural_neologism_examples(max_items=60, seed=13)
+    assert len(examples) == 60
+    cats = {c for ex in examples for c in ex.categories}
+    assert {
+        "slang",
+        "benign_tricky",
+        "sexual",
+        "self_harm",
+        "drugs",
+        "violence",
+        "harassment",
+        "profanity",
+    }.issubset(cats)
+
+    pairs = build_procedural_neologism_pairs(max_pairs=40, seed=13)
+    assert len(pairs) == 40
+    assert {p.concept for p in pairs} == {"slang_benign", "slang_toxic"}
+
+    from minorsafe.data.synth import filter_contrastive_pairs
+
+    kept, _ = filter_contrastive_pairs(pairs, toxicity_backend="lexicon")
+    assert len(kept) >= 30
+
+    # Mock cheaper teacher LLM responses for synthesize_neologism_data_with_llm
+    def _fake_teacher(prompts, **_kwargs):
+        all_entries = (*BENIGN_NEOLOGISMS, *TOXIC_NEOLOGISMS)
+        out = []
+        for idx, p in enumerate(prompts):
+            term = next(e["term"] for e in all_entries if f"'{e['term']}'" in p)
+            if '"positive"' in p:
+                out.append(
+                    (
+                        f'{{"prompt": "Question {idx} about {term}?", '
+                        f'"positive": "Clear standard English helpful answer number {idx} for teenagers.", '
+                        f'"negative": "Bro {term} answer number {idx} with emojis 💀🔥 for teens."}}',
+                        20,
+                        30,
+                    )
+                )
+            else:
+                out.append(
+                    (
+                        f'{{"prompt": "Chat {idx} using {term} 💀?", "reference_safe": "Helpful safe response {idx}."}}',
+                        15,
+                        20,
+                    )
+                )
+        return out
+
+    import minorsafe.data.synth as synth_mod
+
+    monkeypatch.setattr(synth_mod, "generate_teacher_texts", _fake_teacher)
+    teacher_spec = load_models()["qwen25_3b_teacher"]
+    llm_ex, llm_pairs, toks = synthesize_neologism_data_with_llm(
+        teacher_spec=teacher_spec,
+        teacher_backend="vllm",
+        n_examples=6,
+        n_pairs=6,
+    )
+    assert len(llm_ex) == 6
+    assert len(llm_pairs) == 6
+    assert toks > 0
+    assert all(ex.meta.get("neologism") is True for ex in llm_ex)
