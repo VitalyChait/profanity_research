@@ -1,0 +1,271 @@
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{enumitem}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    citecolor=blue!60!black,
+    urlcolor=blue!60!black
+}
+
+\title{\textbf{MinorSafe: Cost-Effectiveness, Latent Tomography, and Projection-Gated Activation Steering for Age-Appropriate (12--18) Language Models}}
+\author{MinorSafe Research Manuscript \\ \small\textit{Pre-Data Framework Draft --- GPU Experiments Currently Executing}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{center}
+\fbox{\parbox{0.94\textwidth}{
+\textbf{Manuscript Status (Experiments In Progress):} GPU benchmark runs are currently executing via the unattended MSBA pipeline (\texttt{scripts/run\_autopilot.sh} / \texttt{scripts/run\_msba.sh}). This document presents the research objectives, theoretical framework, pre-registered hypotheses (\textbf{H1--H10}), updated corpus and coined-neologism design, model matrix, ongoing experimental suites, and statistical evaluation protocol. All empirical results, post-rebuild corpus counts, hypothesis verdicts, and final conclusions remain intentionally unpopulated (\texttt{[DATA PENDING]}) until all benchmark phases and the 150-sample human calibration finish and \texttt{minorsafe analyze} generates final tables and figures.
+}}
+\end{center}
+
+\begin{abstract}
+Deploying conversational Large Language Models (LLMs) for adolescent users aged 12--18 requires satisfying strict developmental safety boundaries---zero explicit or obfuscated profanity, slurs, or adult harms---alongside an accessible reading level (Flesch-Kincaid grade $\le 8.0$) and viable real-time latency and token economics. Existing alignment strategies present conflicting trade-offs: parameter fine-tuning (LoRA/QLoRA) modifies weights, incurs non-trivial setup compute, risks catastrophic forgetting of general reasoning, and lags behind rapid shifts in youth vernacular, whereas external autoregressive guardrails multiply token processing and per-query latency. Representation Engineering (RepE) and runtime activation steering offer a training-free alternative by modifying residual-stream activations mid-computation without weight updates. We introduce \textbf{MinorSafe}, a cross-family empirical benchmark and mechanistic framework comparing unmodified and system-prompted baselines (\textbf{M0a}, \textbf{M0b}), external bidirectional encoder and autoregressive decoder guardrails (\textbf{M1-Enc}, \textbf{M1-Dec}) paired with four post-detection remediation actions, parameter-efficient fine-tuning (\textbf{M2}), and activation-space steering and probing (\textbf{M3}: \texttt{SwFC}, \texttt{StTP}, \texttt{StMP}, \texttt{StTP-Ortho}, and \texttt{M3-Probe}) across four generator families (\texttt{Qwen}, \texttt{DeepSeek}, \texttt{Gemma}, \texttt{Llama}) and three parameter scale tiers ($<1\text{B}$, $\sim 1\text{--}4\text{B}$, $\sim 7\text{--}9\text{B}$). MinorSafe further investigates \textit{structural dataset corruption}---whether benign teen sociolects become spuriously entangled with toxicity directions inside foundational models---evaluates out-of-distribution generalization via a synthetic \textbf{coined-neologism corpus}, and tests Gram-Schmidt sociolect orthogonalization (\texttt{StTP-Ortho}) with token-level hyperplane calibration and dev-set hyperparameter sweeping against over-refusal and adversarial obfuscation. \textbf{[PENDING EMPIRICAL RESULTS]:} Quantitative results across \textbf{RQ-A} and \textbf{RQ-B} will be integrated upon completion of the ongoing GPU runs.
+\end{abstract}
+
+% ==============================================================================
+\section{Introduction and Motivation}
+% ==============================================================================
+
+Conversational AI systems serving adolescents aged 12--18 (\texttt{teen\_12\_18}) must simultaneously enforce developmental appropriateness and preserve natural, helpful dialogue at sustainable inference cost. Unlike adult-focused safety filters, adolescent interaction requires: (i) strict exclusion of explicit profanity, slurs, obfuscated vulgarities, sexual content, graphic violence, self-harm encouragement, and illegal drug instructions; (ii) accessible vocabulary targeting a Flesch-Kincaid (FK) grade level $\le 8.0$; and (iii) tolerance of harmless teenage vernacular and expressive emojis without condescending refusals.
+
+\subsection{Limitations of Existing Hardening Paradigms}
+Current deployment strategies exhibit structural trade-offs across setup compute ($T_{\text{setup}}, K_{\text{setup}}$), per-query overhead ($T_{\text{query}}, K_{\text{query}}$), general capability preservation, and responsiveness to subcultural drift:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{System Prompting (M0b)} incurs zero setup cost but consumes input prefill tokens on every turn, remains susceptible to lexical complexity drift, and can exacerbate false refusals on benign slang.
+    \item \textbf{External Guardrails (M1-Enc, M1-Dec)} interpose input/output classifiers and remediation actions (\texttt{fallback}, \texttt{regenerate}, \texttt{llm\_rewrite}, \texttt{mlm\_substitute}). Autoregressive decoder guards introduce secondary decoding passes, whereas lightweight encoders rely on effective remediation mechanisms to rewrite rather than merely block salvageable content.
+    \item \textbf{Parameter-Efficient Fine-Tuning (M2: LoRA/QLoRA)} avoids runtime overhead once adapters are merged into BF16 weights, but requires gradient-based setup compute, risks upstream reasoning degradation on MMLU and GSM8K, and requires periodic retraining as youth slang evolves.
+    \item \textbf{Activation Steering and Probing (M3)} \citep{zou2023representation,turner2023activation} isolates linear concept axes in a single forward pass over contrastive pairs and intervenes at inference time without modifying static weights. While uniform additive steering (\texttt{SwFC}) can push token representations off-manifold and cause repetition collapse, projection-gated steering (\texttt{StTP}, \texttt{StMP}) applies corrections conditionally only when activations violate a calibrated hyperplane threshold.
+\end{itemize}
+
+\subsection{Subcultural Language Evolution, Structural Dataset Corruption, and Coined Neologisms}
+Adolescents communicate using rapidly evolving gaming argot, neologisms, syntactic truncations, and emojis. In web-scraped pretraining corpora, benign youth vernacular frequently co-occurs with informal toxicity, creating \textit{structural dataset corruption}: the latent direction representing benign adolescent sociolect can become positively aligned in cosine space with profanity and harm. This yields dual failure modes: (1) \textit{exaggerated safety (over-refusal)} on harmless teen slang, and (2) \textit{evasion} via leetspeak, symbol masking, character spacing, homoglyphs, algospeak, emoji profanity, and newly coined slang terms absent from pretraining corpora.
+
+\subsection{Contributions}
+MinorSafe makes five methodological and experimental contributions:
+\begin{enumerate}[leftmargin=1.5em]
+    \item A currency-agnostic \textbf{raw token and time cost-alignment framework} comparing \textbf{M0--M3} through unified telemetry and break-even volume modeling.
+    \item \textbf{Out-of-Sample Latent Artificial Tomography (LAT)} measuring held-out layer-wise separability, cross-concept cosine entanglement, and Logit Lens vocabulary projections across model scales.
+    \item \textbf{Sociolect-Orthogonalized, Token-Calibrated Projection-Gated Steering (\texttt{StTP-Ortho})}, removing a cleanly isolated benign-slang register direction from safety directions via Gram-Schmidt projection while calibrating decision hyperplanes on completion token activations with dev-set hyperparameter sweeping.
+    \item A \textbf{coined-neologism out-of-distribution corpus} (\texttt{neologisms.py}) alongside a controlled \textbf{dynamic sentence recomposition} benchmark comparing in-flight multi-concept steering against encoder masked-LM substitution (\texttt{mlm\_substitute}), autoregressive rewriting (\texttt{llm\_rewrite}), and LoRA.
+    \item A \textbf{cross-family scale, reasoning-overhead, and quantization audit} spanning \texttt{Qwen}, \texttt{DeepSeek}, \texttt{Gemma}, and \texttt{Llama}, quantifying hidden \texttt{<think>} token overhead and steerability retention under \texttt{INT8} and \texttt{NF4}.
+\end{enumerate}
+
+% ==============================================================================
+\section{Research Objectives and Pre-Registered Hypotheses}
+% ==============================================================================
+
+\subsection{Research Questions}
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{RQ-A (Cost-Effectiveness and Deployment Economics):} Which hardening strategy maximizes age-appropriate response quality (\texttt{success}, \texttt{guard\_macro\_f1}) per raw token (\texttt{setup\_tokens}, \texttt{tok\_total}) and per wall-clock / GPU second (\texttt{setup\_wall\_s}, \texttt{setup\_gpu\_s}, \texttt{e2e\_ms}, \texttt{decode\_tok\_per\_s}, \texttt{effective\_tok\_per\_s}) across query volumes $N$?
+    \item \textbf{RQ-B (Latent Mechanics, Dynamic Recomposition, and Subcultural Evolution):} How do training-free latent interventions (\textbf{M3}) compare against parameter fine-tuning (\textbf{M2}), external guardrails (\textbf{M1-Enc}, \textbf{M1-Dec}), and system prompting (\textbf{M0b}) across dynamic sentence recomposition, benign teen-slang and unseen-neologism over-refusal, obfuscated/emoji profanity evasion, scale thresholds ($<1\text{B}$, $\sim 1\text{--}4\text{B}$, $\sim 7\text{--}9\text{B}$), general reasoning retention, and quantization?
+\end{itemize}
+
+\subsection{Locked Experimental Controls}
+Seven programmatic constraints prevent confounding across methods: (1) a single locked age band \texttt{teen\_12\_18} ($\text{FK} \le 8.0$); (2) four generator families (\texttt{Qwen}, \texttt{DeepSeek}, \texttt{Gemma}, \texttt{Llama}) across \texttt{S}/\texttt{M}/\texttt{L} tiers with missing $<1\text{B}$ slots explicitly marked \texttt{n/a}; (3) cost reporting strictly in raw tokens and seconds (no hardcoded currency); (4) system prompt restricted exclusively to \texttt{M0b} (\texttt{system\_prompt=None} for \texttt{M0a}, \texttt{M1}, \texttt{M2}, \texttt{M3}); (5) multi-turn drift decoupled into an optional extension (\texttt{multiturn.yaml}); (6) 150-response method-blinded human calibration of the cross-family LLM judge; and (7) English-only filtering (\texttt{english\_word\_ratio} $\ge 0.60$ checking \texttt{wordfreq} Zipf $\ge 3.7$ and exempting lexicon and coined-neologism terms) with strict Unicode \texttt{NFC} preservation of emojis, homoglyphs, and symbols.
+
+\subsection{Pre-Registered Hypotheses (\textbf{H1--H10})}
+Table~\ref{tab:hypotheses_design} summarizes the ten pre-registered hypotheses implemented via deterministic rules in \texttt{src/minorsafe/analysis/hypotheses.py}.
+
+\begin{table}[ht]
+\centering
+\caption{Pre-registered hypotheses (\textbf{H1--H10}), target experiments, and programmatic evaluation criteria. All verdicts are currently \texttt{PENDING} while GPU runs execute.}
+\label{tab:hypotheses_design}
+\small
+\begin{tabular}{p{0.06\textwidth} p{0.28\textwidth} p{0.18\textwidth} p{0.38\textwidth}}
+\toprule
+\textbf{ID} & \textbf{Hypothesis Summary} & \textbf{Experiment(s)} & \textbf{Programmatic Decision Rule} \\
+\midrule
+\textbf{H1} & \texttt{StTP} achieves \texttt{success} within 5 pts of LoRA at $<1\%$ setup GPU-s/tokens and $1.0\times$ runtime tokens. & \texttt{main\_grid}, \texttt{ramp\_up} & $\text{succ}(\text{StTP}) \ge \text{succ}(\text{LoRA}) - 0.05$, $\text{setup}(\text{StTP}) < 0.01 \cdot \text{setup}(\text{LoRA})$, $\text{tok}(\text{StTP}) \le 1.05 \cdot \text{tok}(\text{M0a})$. \\
+\textbf{H2} & Uniform \texttt{SwFC} increases PPL and 4-gram repetition more than gated \texttt{StTP}/\texttt{StMP}. & \texttt{main\_grid} & Paired per-example diffs (\texttt{SwFC} $-$ \texttt{StTP}/\texttt{StMP}) on \texttt{ppl}, \texttt{repetition\_rate} $> 0$ (Holm Wilcoxon $p < 0.05$). \\
+\textbf{H3} & Fine-tuned encoder guards match decoder guards within $\pm 3$ Macro-F1 pts at $\ge 10\times$ lower latency and $0$ guard output tokens. & \texttt{guards} & $|\text{F1}_{\text{enc}} - \text{F1}_{\text{dec}}| \le 0.03$, $\text{lat}_{\text{dec}} \ge 10 \cdot \text{lat}_{\text{enc}}$, $\text{tok\_guard\_out}_{\text{enc}} = 0$. \\
+\textbf{H4} & \texttt{StTP} and \texttt{mlm\_substitute} achieve BERTScore-F1 $\ge 0.88$ at $\le 0.5\times$ tokens and time of \texttt{llm\_rewrite}. & \texttt{recomposition} & Both arms satisfy $\text{BERTScore-F1} \ge 0.88$, $\text{tok\_total} \le 0.5\times\text{ref}$, $\text{e2e\_ms\_p50} \le 0.5\times\text{ref}$. \\
+\textbf{H5} & Benign teen slang has positive mid-layer cosine with profanity; \texttt{StTP-Ortho} lowers \texttt{slang\_fpr} vs.\ \texttt{StTP} and \texttt{M0b}. & \texttt{tomography}, \texttt{subculture\_audit} & $\cos(\hat{\mathbf{v}}_{\text{prof}}, \hat{\mathbf{v}}_{\text{slang\_benign}}) > 0$ and $\text{slang\_fpr}(\text{Ortho}) < \min(\text{StTP}, \text{M0b})$. \\
+\textbf{H6} & Static lexicons obtain $< 50\%$ obfuscated recall; neural guards and latent probes/steering exceed lexicon recall. & \texttt{guards}, \texttt{subculture\_audit} & $\text{lexicon\_obf\_recall} < 0.50$ and neural $\text{obfuscated\_recall} > \text{lexicon}$ (or steering success $>$ \texttt{M0a}). \\
+\textbf{H7} & Sub-1B decoders show lower mid-layer linear separability and higher steered $\Delta\text{PPL}$ than \texttt{M}/\texttt{L} models. & \texttt{tomography}, \texttt{main\_grid} & Stratified by size group: $\text{AUROC}(S) < \text{AUROC}(M, L)$ and $\Delta\text{PPL}(S) > \Delta\text{PPL}(M, L)$. \\
+\textbf{H8} & LoRA degrades general reasoning (\texttt{tinyMMLU}, \texttt{tinyGSM8K}) more than \texttt{StTP}. & \texttt{main\_grid} & Per cell: $\Delta\text{MMLU}(\text{LoRA}) < \Delta\text{MMLU}(\text{StTP})$ and $\Delta\text{GSM8K}(\text{LoRA}) < \Delta\text{GSM8K}(\text{StTP})$. \\
+\textbf{H9} & DeepSeek-R1 reasoning models consume $\ge 2\times$ \texttt{tok\_total} and \texttt{e2e\_ms} vs.\ matched non-reasoning models, falling off the Pareto front. & \texttt{main\_grid} (\texttt{M0a}) & Token ratio $\ge 2.0$, latency ratio $\ge 2.0$, and reasoning model dominated on $(\max \text{succ}, \min \text{tok})$ front. \\
+\textbf{H10} & \texttt{INT8} retains $\ge 95\%$ BF16 steerability (\texttt{SRI}) with transferred vectors; 4-bit degrades with transferred and recovers with native vectors. & \texttt{quant\_grid} (Secondary) & $\text{SRI}(\text{int8}, \text{bf16}) \ge 0.95$ and $\text{SRI}(q_4, \text{bf16}) < \text{SRI}(q_4, \text{native})$ for $q_4 \in \{\text{nf4}, \text{awq}\}$. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ==============================================================================
+\section{Theoretical Framework and Intervention Methodology}
+% ==============================================================================
+
+\subsection{Intervention Families (\textbf{M0--M3})}
+MinorSafe defines 10 method specifications in \texttt{configs/methods/}, expanding to 14 arms in \texttt{main\_grid.yaml}:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{M0a (\texttt{m0a\_raw}) / M0b (\texttt{m0b\_sysprompt}):} Unmodified base model without or with the \texttt{teen\_12\_18} system prompt.
+    \item \textbf{M1-Enc (\texttt{m1\_encoder\_guard}):} Pretrained zero-shot (\texttt{toxic\_bert}, \texttt{roberta\_tox}) or fine-tuned bidirectional encoder (\texttt{modernbert\_base}, \texttt{modernbert\_large}, \texttt{eurobert\_2b}, \texttt{xlmr\_xxl}; 2 epochs, $\text{lr}=3\times 10^{-5}$, dev Macro-F1 threshold calibration) evaluated at \texttt{placement=both}, coupled with \texttt{fallback}, \texttt{regenerate} (up to 2 resamples), \texttt{llm\_rewrite} (user-turn instruction), or \texttt{mlm\_substitute} (leave-one-out encoder attribution + lexicon/obfuscation masking + bidirectional MLM infilling filtered by Zipf frequency $\ge 3.5$).
+    \item \textbf{M1-Dec (\texttt{m1\_decoder\_guard}):} Autoregressive safety classifier (\texttt{qwen3guard\_*}, \texttt{llamaguard3\_*}) scoring minor policy $S_{\text{minor}}$ via verdict-step first-token log-probabilities $\sigma(\ell_{\text{unsafe}} - \ell_{\text{safe}})$.
+    \item \textbf{M2 (\texttt{m2\_lora}):} PEFT LoRA/QLoRA fine-tuning \citep{hu2022lora,dettmers2023qlora} ($r=16$, $\alpha=32$, dropout $0.05$, $\text{lr}=2\times 10^{-4}$, 2 epochs, $N_{\text{calib}}=500$) over clean \texttt{calib} completions with prompt-token loss masking, merged for zero inference latency overhead under BF16.
+    \item \textbf{M3 (\texttt{SwFC}, \texttt{StTP}, \texttt{StMP}, \texttt{StTP-Ortho}, \texttt{M3-Probe}):} Training-free activation extraction with dev-set hyperparameter sweeping (\texttt{use\_sweep: true}), token-calibrated hyperplane gating, and middle-layer linear probing (\texttt{last\_prompt\_token} prefill regime or \texttt{mean\_completion} response regime).
+\end{itemize}
+
+\subsection{Contrastive Vector Extraction and Exact Token Alignment}
+Given $N_{\text{calib}}$ contrastive triples $(x_i, y_i^+, y_i^-)$ from \texttt{calib}, both $x_i$ and $(x_i, y_i^\pm)$ are rendered through the generator chat template to determine the exact prompt prefix length $L_{\text{prompt}}$, isolating completion hidden states $\mathbf{H}[0, L_{\text{prompt}}:, :]$ across all candidate layers in a single forward pass. Sequence-pooled vectors $\mathbf{h}_i^+, \mathbf{h}_i^- \in \mathbb{R}^D$ are obtained via \texttt{mean\_completion} pooling (or \texttt{last\_prompt\_token} for prompt probes), while up to 32 completion token activations per item are collected for hyperplane fitting. Direction vectors $\hat{\mathbf{v}}_l$ are computed either via Contrastive Activation Addition (CAA) difference-in-means or symmetric RepE/LAT PCA over $[\Delta \mathbf{H}_l; -\Delta \mathbf{H}_l]$, sign-oriented such that $\mu_+ \ge \mu_-$.
+
+\subsection{Pure Sociolect Isolation and Gram-Schmidt Orthogonalization}
+To isolate pure youth sociolect style without confounding refusal behavior, \texttt{slang\_benign} pairs contrast a constructive standard-English response (\texttt{positive}) against a constructive, length-matched youth-sociolect response with expressive emojis (\texttt{negative}) conveying the exact same benign proposition. In \texttt{m3\_steer\_ortho}, this sociolect direction $\hat{\mathbf{v}}_{\text{slang\_benign}}^{(l)}$ is projected out of target directions via Gram-Schmidt orthogonalization:
+\begin{equation}
+\mathbf{v}_{\text{ortho}}^{(l)} = \hat{\mathbf{v}}_{\text{target}}^{(l)} - \left\langle \hat{\mathbf{v}}_{\text{target}}^{(l)}, \hat{\mathbf{v}}_{\text{slang\_benign}}^{(l)} \right\rangle \hat{\mathbf{v}}_{\text{slang\_benign}}^{(l)}, \qquad
+\hat{\mathbf{v}}_{\text{ortho}}^{(l)} = \frac{\mathbf{v}_{\text{ortho}}^{(l)}}{\|\mathbf{v}_{\text{ortho}}^{(l)}\|_2}.
+\end{equation}
+
+\subsection{Token-Level Hyperplane Calibration, Dev Sweep, and Residual Hooks}
+To align calibration geometry with per-token runtime gating, scalar projections $\rho_t^\pm = \langle \mathbf{h}_t^\pm, \hat{\mathbf{v}}_l \rangle$ of completion token activations (whenever orientation-consistent with sequence means) are fit via 1D logistic regression ($w, b$) to obtain boundary $m_l = -b/w$ (with midpoint fallback if degenerate) and target coordinate $s_l = \max(\mu_+ + \beta \sigma_+, m_l + 0.1\sigma_+)$. All four steering configs enable dev-set sweeping (\texttt{sweep\_steering\_hyperparams}) over depths $l/L \in \{0.25, 0.35, 0.45, 0.55, 0.65, 0.75\}$ and strengths ($\alpha \in \{1, 2, 4, 8\}$ or $\beta \in \{0, 0.5, 1\}$) on 16 stratified \texttt{dev} items, maximizing proxy \texttt{success} subject to $\Delta\text{PPL} \le 10\%$. At decode step $t$, \texttt{ResidualSteeringHook} applies:
+\begin{align}
+\text{SwFC:} \quad \mathbf{h}' &= \mathbf{h} + \alpha \hat{\mathbf{v}}_l, \\
+\text{StTP:} \quad \mathbf{h}' &= \begin{cases} \mathbf{h} + (s_l - \rho)\hat{\mathbf{v}}_l & \text{if } \rho < m_l, \\ \mathbf{h} & \text{if } \rho \ge m_l, \end{cases} \\
+\text{StMP:} \quad \mathbf{h}' &= \begin{cases} \mathbf{h} + 2(m_l - \rho)\hat{\mathbf{v}}_l & \text{if } \rho < m_l, \\ \mathbf{h} & \text{if } \rho \ge m_l. \end{cases}
+\end{align}
+Compliant tokens ($\rho \ge m_l$) remain bitwise identical under \texttt{StTP} and \texttt{StMP}.
+
+\subsection{Out-of-Sample Linear Artificial Tomography (LAT)}
+Across every transformer layer $l \in \{0, \dots, L-1\}$, LAT calibrates directions on \texttt{calib} pairs and measures held-out linear separability (\texttt{AUROC} on \texttt{dev}+\texttt{test} pairs, tracked via \texttt{auroc\_eval\_modes}), cross-concept cosine similarity matrices $C_{ab}(l) = \langle \hat{\mathbf{v}}_a^{(l)}, \hat{\mathbf{v}}_b^{(l)} \rangle$ across \texttt{profanity}, \texttt{lexical\_complexity}, \texttt{slang\_toxic}, and \texttt{slang\_benign}, and Logit Lens projections $\text{lm\_head}(\text{norm}(\hat{\mathbf{v}}_l))$.
+
+% ==============================================================================
+\section{Dataset Construction, Coined Neologisms, and Obfuscation Corpus}
+% ==============================================================================
+
+The MinorSafe corpus (\texttt{configs/data.yaml}) combines six example sources---\texttt{lmsys/toxic-chat} \citep{lin2023toxicchat}, \texttt{PKU-Alignment/BeaverTails} \citep{ji2023beavertails}, \texttt{walledai/XSTest} \citep{rottger2024xstest}, \texttt{facebook/asset} \citep{alva2020asset}, an offline \texttt{seed\_corpus}, and a procedural \texttt{neologism\_corpus} (\texttt{src/minorsafe/data/neologisms.py})---with a minimal-pair lexical substitution engine, a 6-mode deterministic obfuscation generator (\texttt{leetspeak}, \texttt{symbol\_mask}, \texttt{char\_spacing}, \texttt{homoglyphs}, \texttt{algospeak}, \texttt{emoji\_profanity}), and teacher-synthesized contrastive pairs and coined-neologism items (\texttt{synth\_teacher: qwen25\_3b\_teacher}, \texttt{synth\_pairs\_per\_concept: 600}, \texttt{synth\_neologism\_examples: 160}, \texttt{synth\_neologism\_pairs: 200}).
+
+Coined neologisms comprise 26 benign youth terms (e.g., \textit{zorbmaxxing}, \textit{kriffled}, \textit{glintpilled}) and 24 toxic algospeak terms (e.g., \textit{gronkpilled}, \textit{vapequib}, \textit{chokemaxx}, \textit{kriffbag}) absent from pretraining corpora, enabling out-of-distribution generalization evaluation. Strict filtering enforces Detoxify bounds (\texttt{pos\_tox} $< 0.10$; \texttt{neg\_tox} $> 0.45$ or lexicon/obfuscated/neologism hit), FK grade margins ($\text{FK}_{\text{neg}} - \text{FK}_{\text{pos}} \ge 1.5$ and $\text{FK}_{\text{pos}} \le 9.0$ on synthesized complexity pairs), length parity ($\le 0.35$), English ratio ($\ge 0.60$), MinHash deduplication ($\text{Jaccard} < 0.80$), Unicode \texttt{NFC} preservation, and zero cross-split leakage across \texttt{calib}/\texttt{dev}/\texttt{test} (\texttt{0.50/0.20/0.30} for examples; \texttt{0.70/0.15/0.15} for pairs).
+
+\textit{Corpus Status:} An earlier pre-neologism baseline build (3,558 examples / 3,558 pairs, 0 cross-split leakage) is being rebuilt under the updated \texttt{configs/data.yaml} specification via \texttt{scripts/restart\_remote.sh}; final split and category counts from the regenerated \texttt{results/data\_card.md} are \texttt{[PENDING REBUILD]}.
+
+% ==============================================================================
+\section{Experimental Setup and Ongoing Benchmark Suites}
+% ==============================================================================
+
+\subsection{Model Matrix}
+MinorSafe evaluates four decoder generator families across three parameter tiers: \textbf{Qwen} (\texttt{qwen25\_05b}, \texttt{qwen25\_15b}, \texttt{qwen25\_3b}, \texttt{qwen25\_7b}) \citep{qwen2025qwen25}, \textbf{DeepSeek} (\texttt{deepseek\_r1\_15b}, \texttt{deepseek\_r1\_8b}, alt \texttt{deepseek\_r1\_7b}; no $<1\text{B}$ checkpoint exists) \citep{deepseek2025r1}, \textbf{Gemma} (\texttt{gemma3\_270m}, \texttt{gemma3\_1b}, \texttt{gemma3\_4b}, \texttt{gemma2\_9b}) \citep{gemma2025gemma3}, and \textbf{Llama} (\texttt{llama32\_1b}, \texttt{llama32\_3b}, \texttt{llama31\_8b}; no $<1\text{B}$ checkpoint exists) \citep{grattafiori2024llama3}. Single-GPU MSBA profiles (\texttt{gpu\_gb10}, \texttt{gpu\_lab1}) evaluate the representative 8-model subset preserving all four families, all three scale tiers, and matched \textbf{H9} reasoning pairs. External guards span \texttt{qwen3guard\_06b}/\texttt{4b}/\texttt{8b}, \texttt{llamaguard3\_1b}/\texttt{8b} \citep{inan2023llamaguard}, \texttt{toxic\_bert} \citep{hanu2020detoxify}, \texttt{roberta\_tox}, \texttt{modernbert\_base}/\texttt{large} \citep{warner2024modernbert}, \texttt{eurobert\_2b}, and \texttt{xlmr\_xxl}. Automated evaluation uses cross-family judge \texttt{mistral\_small\_24b\_awq} (Mistral family, outside all evaluated generator families) at $\text{temperature}=0.0$.
+
+\subsection{Running Experiment Phases}
+Following an isolated assumption pilot (\texttt{pilot.yaml}, archived in \texttt{results/pilot\_archive/}), seven core and secondary suites plus human calibration are configured in \texttt{configs/experiments/} (with MSBA stratified subsampling preserving rare strata):
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Tomography (\texttt{tomography}):} Held-out layer-wise AUROC, cosine entanglement, and Logit Lens across all generators (\textbf{H5}, \textbf{H7}).
+    \item \textbf{Guard Moderation (\texttt{guards.yaml}):} Zero-shot vs.\ fine-tuned \texttt{M1-Enc}, \texttt{M1-Dec}, and \texttt{M3-Probe} on \texttt{test} across 9 safety/slang/obfuscation categories (\textbf{H3}, \textbf{H6}).
+    \item \textbf{Subcultural Audit (\texttt{subculture\_audit.yaml}):} Over-refusal vs.\ obfuscation and coined-neologism resilience comparing \texttt{StTP-Ortho} against \texttt{StTP}, \texttt{M0b}, \texttt{M1}, and \texttt{M2} on \texttt{test} (\textbf{H5}, \textbf{H6}).
+    \item \textbf{Dynamic Recomposition (\texttt{recomposition.yaml}):} \texttt{BERTScore-F1} \citep{zhang2020bertscore}, \texttt{SARI} \citep{xu2016sari}, FK grade compliance, and token/time overhead across \texttt{mlm\_substitute}, \texttt{llm\_rewrite}, \texttt{StTP}, and \texttt{LoRA} (\textbf{H4}).
+    \item \textbf{Main Generative Grid (\texttt{main\_grid.yaml}):} Full 14-arm $\times$ family $\times$ scale benchmark with \texttt{tinyMMLU}/\texttt{tinyGSM8K} capability evaluation (\textbf{H1}, \textbf{H2}, \textbf{H7}, \textbf{H8}, \textbf{H9}).
+    \item \textbf{Ramp-Up Curve (\texttt{ramp\_up.yaml}):} Sweep over requested $N_{\text{calib}} \in \{25, 50, 100, 500, 2000\}$ on \texttt{dev}, tracking \texttt{n\_calib\_effective} (\textbf{RQ-A}, \textbf{H1}).
+    \item \textbf{Quantization Grid (\texttt{quant\_grid.yaml}, Secondary):} \texttt{bf16}, \texttt{int8}, and \texttt{nf4} testing transferred vs.\ native vectors via the Steerability Retention Index (\textbf{H10}).
+    \item \textbf{Human Judge Calibration (\texttt{export-human --n 150}):} Method-blinded annotation of 150 stratified responses validating automated judge agreement.
+\end{enumerate}
+
+% ==============================================================================
+\section{Evaluation Metrics, Telemetry, and Statistical Protocol}
+% ==============================================================================
+
+Every generated response is evaluated across seven pillars: safety (\texttt{detoxify}, obfuscated/emoji profanity patterns, \texttt{toxic\_flag = tox > 0.50 or has\_profanity}, refusal/over-refusal), readability (\texttt{fk\_grade}, \texttt{dale\_chall}, \texttt{rare\_word\_ratio} at Zipf $< 3.6$), semantics (\texttt{bertscore\_f1\_ref}, \texttt{bertscore\_f1\_m0}, \texttt{sari\_score}, \texttt{recompose\_filter\_acc} requiring zero bad spans and $\text{BERTScore-F1} \ge 0.70$), fluency (\texttt{gpt2-large} perplexity, $\Delta\text{PPL}\%$, 4-gram \texttt{repetition\_rate}), detection (\texttt{guard\_macro\_f1}, \texttt{guard\_auroc}, \texttt{obfuscated\_recall}), capability retention ($\Delta\text{MMLU}$, $\Delta\text{GSM8K}$), and cross-family judge 1--5 scores combined into binary \texttt{success}:
+\begin{align}
+\text{success}_{\text{unsafe}} &= \neg\text{toxic} \land \neg\text{prof} \land (\text{age\_app} \ge 4) \land \big(\text{refusal} \lor (\text{help} \ge 3 \land \text{meaning} \ge 3)\big), \\
+\text{success}_{\text{safe}} &= \neg\text{toxic} \land \neg\text{prof} \land \neg\text{refusal} \land (\text{age\_app} \ge 4) \land (\text{help} \ge 3) \land (\text{meaning} \ge 3).
+\end{align}
+
+Total per-query tokens $K_{\text{query}}(i)$ sum generator input/output, hidden \texttt{<think>} reasoning tokens, guard input/output, encoder passes, rewrites, and regenerations. Cumulative deployment costs and break-even query volumes $N^*$ follow:
+\begin{equation}
+\text{Time}_m(N) = T_{\text{setup}, m} + N \cdot \overline{T}_{\text{query}, m}, \quad
+\text{Tokens}_m(N) = K_{\text{setup}, m} + N \cdot \overline{K}_{\text{query}, m}, \quad
+\text{BreakEven}(A, B) = \frac{T_{\text{setup}, A} - T_{\text{setup}, B}}{\overline{T}_{\text{query}, B} - \overline{T}_{\text{query}, A}}.
+\end{equation}
+Statistical inference employs clustered bootstrap 95\% confidence intervals ($n_{\text{boot}}=300$ in \texttt{aggregate.py}, clustered by \texttt{example\_id}) and paired two-sided Wilcoxon signed-rank tests with Holm-Bonferroni correction.
+
+% ==============================================================================
+\section{Empirical Results \textit{(Placeholders --- Experiments In Progress)}}
+% ==============================================================================
+
+\noindent\textit{Note: All empirical tables and figure hooks below await completion of ongoing GPU runs and \texttt{minorsafe analyze}. No preliminary or inferred figures are inserted.}
+
+\subsection{Human Judge Calibration (\texttt{results/human\_judge\_agreement.json})}
+\begin{table}[ht]
+\centering
+\caption{Cross-family LLM Judge alignment against 150 method-blinded human ratings.}
+\label{tab:human_agreement}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Dimension (1--5)} & \textbf{$n_{\text{samples}}$} & \textbf{Quadratic Cohen's $\kappa$} & \textbf{Spearman's $\rho$} \\
+\midrule
+\texttt{age\_appropriate} & \texttt{[PENDING]} & \texttt{[PENDING]} & \texttt{[PENDING]} \\
+\texttt{meaning\_preserved} & \texttt{[PENDING]} & \texttt{[PENDING]} & \texttt{[PENDING]} \\
+\texttt{helpful} & \texttt{[PENDING]} & \texttt{[PENDING]} & \texttt{[PENDING]} \\
+\texttt{fluent} & \texttt{[PENDING]} & \texttt{[PENDING]} & \texttt{[PENDING]} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Main Benchmark Grid and Pareto Frontiers}
+% Once minorsafe analyze completes, replace placeholder block with:
+% \input{../results/tables/main_benchmark.tex}
+\begin{table}[ht]
+\centering
+\caption{Main benchmark placeholder (\texttt{results/tables/main\_benchmark.tex} and \texttt{results/cost\_table.csv}).}
+\label{tab:main_placeholder}
+\begin{tabular}{lccccccc}
+\toprule
+\textbf{Method} & \textbf{Setup Wall (s)} & \textbf{Setup Tok} & \textbf{Tok/Query} & \textbf{E2E p50 (ms)} & \textbf{Decode tok/s} & \textbf{Success (95\% CI)} & \textbf{$\Delta\text{MMLU}/\Delta\text{GSM8K}$} \\
+\midrule
+\texttt{m0a\_raw}--\texttt{m3\_probe} & \texttt{[PENDING]} & \texttt{[PENDING]} & \texttt{[PENDING]} & \texttt{[PENDING]} & \texttt{[PENDING]} & \texttt{[PENDING]} & \texttt{[PENDING]} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[ht]
+\centering
+% \includegraphics[width=0.48\textwidth]{../results/figures/fig1_pareto_cost_tokens.pdf}
+% \includegraphics[width=0.48\textwidth]{../results/figures/fig2_pareto_latency_throughput.pdf}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1.2em}\textbf{Figures 1 \& 2 Placeholder:} \texttt{fig1\_pareto\_cost\_tokens.pdf} and \texttt{fig2\_pareto\_latency\_throughput.pdf} — \texttt{[DATA PENDING]}\vspace{1.2em}}}
+\caption{Cost-alignment Pareto frontiers across token budgets, latency, and throughput.}
+\label{fig:pareto}
+\end{figure}
+
+\subsection{Secondary Suites (\texttt{ramp\_up}, \texttt{guards}, \texttt{recomposition}, \texttt{subculture\_audit}, \texttt{quant\_grid})}
+All planned figure slots---TCO break-even curves (\texttt{fig3}), calibration ramp-up annotated with \texttt{n\_calib\_effective} (\texttt{fig4}), encoder vs.\ decoder guards (\texttt{fig5}), dynamic sentence recomposition (\texttt{fig6}), subcultural latent tomography (\texttt{fig7}), and quantization SRI scaling (\texttt{fig8})---are reserved under \texttt{../results/figures/} and remain \texttt{[DATA PENDING]}.
+
+% ==============================================================================
+\section{Pre-Registered Hypothesis Verdicts \textit{(Placeholder)}}
+% ==============================================================================
+
+% Once minorsafe analyze completes, integrate:
+% \input{../results/tables/hypothesis_verdicts.tex}
+\begin{table}[ht]
+\centering
+\caption{Pre-registered hypothesis verdicts (\texttt{results/tables/hypothesis\_verdicts.tex}).}
+\label{tab:verdicts_placeholder}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Hypothesis} & \textbf{Status} & \textbf{Evaluable Cells} & \textbf{Evidence Summary} \\
+\midrule
+\textbf{H1--H10} & \texttt{NOT\_EVALUATED (Experiments Running)} & \texttt{0} & \texttt{[DATA PENDING]} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ==============================================================================
+\section{Scope, Limitations, and Conclusions \textit{(Pending Data)}}
+% ==============================================================================
+
+Methodological constraints tracked for final interpretation include small category counts in specific evaluation slices (to be audited in the regenerated \texttt{results/data\_card.md}, mitigated during bounded runs via round-robin \texttt{stratified\_subsample}), single-turn focus in core grids (\texttt{Decision 5}), cross-family judge calibration dependence, and English-only scope. No conversational data from real minors is collected.
+
+\paragraph{Conclusions.} \texttt{[TO BE COMPLETED AFTER ALL BENCHMARK PHASES AND HUMAN CALIBRATION FINISH.]}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
