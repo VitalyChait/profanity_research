@@ -7,6 +7,7 @@ import gc
 import json
 import math
 import os
+import random
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,35 @@ from minorsafe.runner.grid import RunSpec, expand_experiment_grid, verify_split_
 from minorsafe.runner.store import RunStore
 from minorsafe.telemetry import GPUSampler, SmartRunLogger
 from minorsafe.utils import DATA_DIR, RESULTS_DIR, git_sha, package_versions, read_json, write_json
+
+
+def _stratified_subsample(examples: list[Example], max_examples: int, seed: int = 13) -> list[Example]:
+    """Deterministically round-robin across primary categories so rare subsets stay covered."""
+    if max_examples <= 0 or max_examples >= len(examples):
+        return examples
+    rng = random.Random(seed)
+    buckets: dict[str, list[Example]] = {}
+    for ex in examples:
+        cat = ex.categories[0] if ex.categories else "benign"
+        buckets.setdefault(cat, []).append(ex)
+    for items in buckets.values():
+        rng.shuffle(items)
+
+    chosen: list[Example] = []
+    keys = sorted(buckets.keys())
+    idx = 0
+    while len(chosen) < max_examples:
+        added_any = False
+        for k in keys:
+            if idx < len(buckets[k]):
+                chosen.append(buckets[k][idx])
+                added_any = True
+                if len(chosen) >= max_examples:
+                    break
+        if not added_any:
+            break
+        idx += 1
+    return chosen
 
 
 def _output_to_row(
@@ -126,7 +156,7 @@ def run_experiment(
         cat_set = set(exp.categories)
         split_examples = [e for e in split_examples if any(c in cat_set for c in e.categories)]
     if exp.max_examples:
-        split_examples = split_examples[: exp.max_examples]
+        split_examples = _stratified_subsample(split_examples, exp.max_examples)
 
     calib_ex = [e for e in all_examples if e.split == "calib"]
     dev_ex = [e for e in all_examples if e.split == "dev"]

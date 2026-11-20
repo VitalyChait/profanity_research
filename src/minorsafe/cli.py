@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import csv
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -258,6 +260,29 @@ def cmd_status(runs_dir: Path = typer.Option(RESULTS_DIR / "runs", "--runs", "--
         typer.echo(f"{exp_dir.name}: {n} run shards")
 
 
+_DONE_RE = re.compile(r"\[run_phase\] DONE phase=(\S+) profile=(\S+) elapsed=(\d+)s status=(\d+) log=(.+)")
+
+
+def _write_phase_timings(out_dir: Path) -> None:
+    """Summarize phase wall times from results/logs/*.log and experiment totals from events.jsonl."""
+    log_dir = out_dir / "logs"
+    if not log_dir.exists():
+        return
+    phase_rows: list[list[str]] = []
+    for lp in sorted(log_dir.glob("*.log")):
+        try:
+            text = lp.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for m in _DONE_RE.finditer(text):
+            phase_rows.append([m.group(1), m.group(2), m.group(3), m.group(4), m.group(5).strip()])
+    if phase_rows:
+        with open(out_dir / "phase_timings.csv", "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["phase", "profile", "elapsed_s", "status", "log_file"])
+            w.writerows(phase_rows)
+
+
 @app.command("analyze")
 def cmd_analyze(
     runs_dir: Path = typer.Option(RESULTS_DIR / "runs", "--runs", "--runs-dir"),
@@ -271,6 +296,7 @@ def cmd_analyze(
     generate_all_figures(summary_df, out_dir / "figures", tomography_dir=tomo_arg)
     generate_all_tables(summary_df, out_dir / "tables", responses_df=responses_df, tomography_dir=tomo_arg)
     rep = generate_executive_report(summary_df, out_dir, responses_df=responses_df, tomography_dir=tomo_arg)
+    _write_phase_timings(out_dir)
     typer.echo(f"Analysis complete. Report written to {rep}")
 
 

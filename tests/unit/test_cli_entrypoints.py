@@ -22,6 +22,7 @@ pytestmark = pytest.mark.unit
 RUN_PHASE = REPO_ROOT / "scripts" / "run_phase.sh"
 PHASES = [
     "smoke",
+    "pilot",
     "data",
     "rampup",
     "guards",

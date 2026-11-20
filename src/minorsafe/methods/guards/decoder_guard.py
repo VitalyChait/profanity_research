@@ -80,7 +80,9 @@ class DecoderGuard:
                 pass
         return wrapped + "\nAssessment:"
 
-    def _score_from_steps(self, scores: tuple[torch.Tensor, ...], gen_ids: list[int]) -> float | None:
+    def _score_from_steps(
+        self, scores: tuple[torch.Tensor, ...], gen_ids: list[int], row_idx: int = 0
+    ) -> float | None:
         if not scores or not self._safe_ids or not self._unsafe_ids:
             return None
         verdict_step = 0
@@ -95,11 +97,21 @@ class DecoderGuard:
                 break
         if verdict_step >= len(scores):
             verdict_step = 0
-        logits = scores[verdict_step][0].float()
+        logits = scores[verdict_step][row_idx].float()
         l_unsafe = torch.logsumexp(logits[self._unsafe_ids], dim=0)
         l_safe = torch.logsumexp(logits[self._safe_ids], dim=0)
         prob = torch.sigmoid(l_unsafe - l_safe)
         return float(prob.item())
+
+    def _calibrate_prob(self, prob: float | None, verdict_txt: str) -> float:
+        if prob is None:
+            is_bad = ("unsafe" in verdict_txt) or ("controversial" in verdict_txt)
+            return 0.95 if is_bad else 0.05
+        if "unsafe" in verdict_txt and prob < self.threshold:
+            return max(prob, 0.85)
+        if "safe" in verdict_txt and "unsafe" not in verdict_txt and prob >= self.threshold:
+            return min(prob, 0.15)
+        return float(prob)
 
     @torch.no_grad()
     def score_pair(self, prompt: str, response: str | None = None) -> tuple[float, int, int]:
@@ -123,16 +135,68 @@ class DecoderGuard:
         gen_seq = out.sequences[0, n_in:]
         n_out = int(gen_seq.numel())
         verdict_txt = self.tok.decode(gen_seq, skip_special_tokens=True).strip().lower()
-
-        prob = self._score_from_steps(tuple(out.scores or ()), gen_seq.tolist())
-        if prob is None:
-            is_bad = ("unsafe" in verdict_txt) or ("controversial" in verdict_txt)
-            prob = 0.95 if is_bad else 0.05
-        elif "unsafe" in verdict_txt and prob < self.threshold:
-            prob = max(prob, 0.85)
-        elif "safe" in verdict_txt and "unsafe" not in verdict_txt and prob >= self.threshold:
-            prob = min(prob, 0.15)
+        prob = self._calibrate_prob(
+            self._score_from_steps(tuple(out.scores or ()), gen_seq.tolist()), verdict_txt
+        )
         return float(prob), n_in, n_out
+
+    @torch.no_grad()
+    def score_pairs_batch(
+        self, pairs: list[tuple[str, str | None]], batch_size: int = 32
+    ) -> list[tuple[float, int, int]]:
+        """Batched decoder-guard scoring returning [(P(unsafe), tok_in, tok_out), ...]."""
+        if not pairs:
+            return []
+        if len(pairs) == 1:
+            return [self.score_pair(pairs[0][0], pairs[0][1])]
+
+        self.model.eval()
+        eos_id = getattr(self.tok, "eos_token_id", None)
+        old_pad_side = getattr(self.tok, "padding_side", "left")
+        if hasattr(self.tok, "padding_side"):
+            self.tok.padding_side = "left"
+
+        results: list[tuple[float, int, int]] = []
+        try:
+            for start in range(0, len(pairs), batch_size):
+                chunk = pairs[start : start + batch_size]
+                rendered = [self._format_guard_input(p, r) for p, r in chunk]
+                enc = self.tok(rendered, return_tensors="pt", padding=True, add_special_tokens=False).to(
+                    self.device
+                )
+                in_pad_len = int(enc["input_ids"].shape[1])
+                attn = enc.get("attention_mask")
+                out = self.model.generate(
+                    **enc,
+                    max_new_tokens=16,
+                    do_sample=False,
+                    temperature=None,
+                    top_p=None,
+                    top_k=None,
+                    pad_token_id=self.tok.pad_token_id,
+                    return_dict_in_generate=True,
+                    output_scores=True,
+                )
+                scores_tuple = tuple(out.scores or ())
+                for row_idx in range(len(chunk)):
+                    n_in = int(attn[row_idx].sum().item()) if attn is not None else in_pad_len
+                    gen_ids = out.sequences[row_idx, in_pad_len:].tolist()
+                    n_out = len(gen_ids)
+                    if eos_id is not None:
+                        for j, tid in enumerate(gen_ids):
+                            if tid == eos_id:
+                                n_out = j + 1
+                                break
+                    trimmed = gen_ids[:n_out]
+                    verdict_txt = self.tok.decode(trimmed, skip_special_tokens=True).strip().lower()
+                    prob = self._calibrate_prob(
+                        self._score_from_steps(scores_tuple, trimmed, row_idx=row_idx), verdict_txt
+                    )
+                    results.append((float(prob), n_in, n_out))
+        finally:
+            if hasattr(self.tok, "padding_side"):
+                self.tok.padding_side = old_pad_side
+        return results
 
     def close(self) -> None:
         if self.model is not None or self.tok is not None:

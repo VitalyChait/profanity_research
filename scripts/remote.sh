@@ -370,7 +370,11 @@ EOF
         done
         run_rsync_push
         ENV_PRE="$(remote_env_prefix)"
-        RUN_CMD="${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/run_phase.sh '${PHASE}' '${RUN_PROFILE}'"
+        if [[ "${PHASE}" == "msba" ]]; then
+            RUN_CMD="${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/run_msba.sh '${RUN_PROFILE}'"
+        else
+            RUN_CMD="${ENV_PRE} cd '${REMOTE_DIR}' && bash scripts/run_phase.sh '${PHASE}' '${RUN_PROFILE}'"
+        fi
         if [[ "${DETACH_MODE}" == "1" ]]; then
             SESSION="minorsafe_${PHASE}"
             DETACH_SCRIPT="$(cat <<EOF

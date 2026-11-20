@@ -105,6 +105,10 @@ Each phase is run by `scripts/run_phase.sh <phase> [profile]`, which:
 # Full core pipeline (data -> rampup -> guards -> main -> recomposition -> subculture -> analyze)
 make main PROFILE=gpu_80gb
 
+# Fast single-node GB10 pilot (~25-35 min assumption test) & full 3-5 day MSBA suite (`gpu_gb10`)
+bash scripts/run_phase.sh pilot gpu_gb10
+bash scripts/run_msba.sh gpu_gb10
+
 # Or single phases:
 make guards PROFILE=gpu_80gb                  # == bash scripts/run_phase.sh guards gpu_80gb
 bash scripts/run_phase.sh main gpu_80gb
