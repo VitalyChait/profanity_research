@@ -18,6 +18,7 @@ def test_shell_scripts_syntax_valid():
     scripts = [
         REPO_ROOT / "setup.sh",
         REPO_ROOT / "scripts" / "setup_server.sh",
+        REPO_ROOT / "scripts" / "snapshot_versions.sh",
         REPO_ROOT / "scripts" / "run_phase.sh",
         REPO_ROOT / "scripts" / "activate.sh",
         REPO_ROOT / "scripts" / "remote.sh",
@@ -72,6 +73,7 @@ def test_remote_script_dry_run_subcommands(tmp_path: Path):
             ["sync"],
             [
                 "rsync",
+                "--exclude=/data/",
                 "--exclude=.remote.env",
                 "--exclude=.secrets/",
                 "root@10.0.0.1:/root/profanity_research/",
@@ -98,6 +100,8 @@ def test_remote_script_dry_run_subcommands(tmp_path: Path):
         assert "test_secret_password" not in res.stdout
         assert "test_secret_password" not in res.stderr
         unescaped = res.stdout.replace("\\", "")
+        if argv == ["sync"]:
+            assert "--exclude=data/" not in unescaped
         for sub in expected_substrings:
             assert sub in unescaped, f"Expected {sub!r} in output for {argv}: {unescaped}"
 
@@ -157,3 +161,23 @@ def test_root_setup_script_dry_run(tmp_path: Path):
     assert res_check.returncode == 0, res_check.stderr + res_check.stdout
     assert "preflight" in res_check.stdout
     assert pw not in res_check.stdout and pw not in res_check.stderr
+
+
+def test_snapshot_versions_creates_snapshot_file(tmp_path: Path):
+    script = REPO_ROOT / "scripts" / "snapshot_versions.sh"
+    env = {**os.environ, "DRY_RUN": "0"}
+    res = subprocess.run(
+        ["bash", str(script), str(tmp_path), "unit_test"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, res.stderr + res.stdout
+    latest = tmp_path / "versions_snapshot_latest.txt"
+    assert latest.exists()
+    snaps = list(tmp_path.glob("versions_snapshot_unit_test_*.txt"))
+    assert len(snaps) == 1
+    body = snaps[0].read_text(encoding="utf-8")
+    assert "python3:" in body
+    assert "minorsafe==" in body

@@ -7,7 +7,7 @@ set -euo pipefail
 # Usage:
 #   bash scripts/remote.sh <subcommand> [args...]
 # Subcommands:
-#   check                        Verify VPN reachability, GPU idle status, and no other active users
+#   check | users                Verify VPN reachability, user activity (`w`/`ps`), GPU idle status, and exclusivity
 #   setup-ssh-key                Generate (if needed) and install an SSH key onto the remote host
 #   sync                         Rsync code/configs to REMOTE_DIR (never uploads .remote.env or secrets)
 #   setup                        Sync repo, bootstrap .venv + GPU deps, and run remote preflight
@@ -170,8 +170,8 @@ run_rsync_push() {
     local cmd=(
         "${AUTH_PREFIX[@]}" rsync -az --delete
         -e "${RSYNC_SSH}"
-        --exclude=.git/
-        --exclude=.venv/
+        --exclude=/.git/
+        --exclude=/.venv/
         --exclude=.remote.env
         --exclude='.remote.env.*'
         --exclude=.secrets/
@@ -180,9 +180,9 @@ run_rsync_push() {
         --exclude='id_ed25519*'
         --exclude='id_rsa*'
         --exclude=.minorsafe.lock
-        --exclude=data/
-        --exclude=results/
-        --exclude=models_cache/
+        --exclude=/data/
+        --exclude=/results/
+        --exclude=/models_cache/
         --exclude=__pycache__/
         --exclude=.pytest_cache/
         --exclude=.ruff_cache/
@@ -219,36 +219,65 @@ remote_env_prefix() {
 }
 
 case "${SUBCMD}" in
-    check)
-        # Validate VPN connectivity, active users (`who`), GPU utilization/processes, and disk space.
+    check|users|who)
+        # Validate VPN connectivity, active users (`w` + `ps`), GPU utilization/processes, and disk space.
         REMOTE_CHECK_SCRIPT="$(cat <<EOF
 echo "Host: \$(hostname) | User: \$(whoami) | Date: \$(date -Iseconds)"
 echo "--- Disk ---"
 df -h "\$( [ -d '${REMOTE_DIR}' ] && echo '${REMOTE_DIR}' || echo / )" | tail -n 1
-echo "--- Logged-in users (who) ---"
-WHO_OUT="\$(who || true)"
-echo "\${WHO_OUT:-<none>}"
-OTHER_USERS="\$(echo "\${WHO_OUT}" | awk -v me="\$(whoami)" 'NF>0 && \$1!=me {print \$1}' | sort -u)"
+echo "--- Active sessions (w) ---"
+W_OUT="\$(w 2>/dev/null || who -u 2>/dev/null || who 2>/dev/null || true)"
+echo "\${W_OUT:-<none>}"
+WHO_OUT="\$(who -u 2>/dev/null || who 2>/dev/null || true)"
+CANDIDATE_USERS="\$(echo "\${WHO_OUT}" | awk -v me="\$(whoami)" 'NF>0 && \$1!=me {print \$1}' | sort -u)"
+ACTIVE_OTHER_USERS=""
+IDLE_OTHER_USERS=""
+if [[ -n "\${CANDIDATE_USERS}" ]]; then
+    echo "--- Other users' processes (top CPU) ---"
+    for u in \${CANDIDATE_USERS}; do
+        ps -u "\${u}" -o user=,pid=,pcpu=,pmem=,etime=,comm=,args= --sort=-pcpu 2>/dev/null | head -n 8 || true
+        HIGH_CPU="\$(ps -u "\${u}" -o pcpu= 2>/dev/null | awk '\$1+0 >= 5.0 {c++} END {print c+0}')"
+        COMP_PROC="\$(ps -u "\${u}" -o pcpu=,comm=,args= 2>/dev/null | awk 'tolower(\$0) ~ /(python|pytest|vllm|torchrun|jupyter|ollama|nvcc|minorsafe)/ && \$1+0 >= 1.0 {c++} END {print c+0}')"
+        ACTIVE_PTS="\$(echo "\${WHO_OUT}" | awk -v u="\${u}" '\$1==u && \$2 ~ /^pts\\// && (\$5 == "." || \$5 ~ /^00:/) {c++} END {print c+0}')"
+        if [[ "\${HIGH_CPU}" -gt 0 ]] || [[ "\${COMP_PROC}" -gt 0 ]] || [[ "\${ACTIVE_PTS}" -gt 0 ]]; then
+            ACTIVE_OTHER_USERS="\${ACTIVE_OTHER_USERS:+\${ACTIVE_OTHER_USERS} }\${u}"
+        else
+            IDLE_OTHER_USERS="\${IDLE_OTHER_USERS:+\${IDLE_OTHER_USERS} }\${u}"
+        fi
+    done
+fi
 echo "--- GPUs ---"
 BUSY=0
 if command -v nvidia-smi >/dev/null 2>&1; then
-    nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader
+    GPU_INFO_OUT="\$(nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader || true)"
+    echo "\${GPU_INFO_OUT}"
+    if [[ "\${GPU_INFO_OUT}" == *"N/A"* ]]; then
+        echo "--- Unified Memory (free -h) ---"
+        free -h | head -n 2
+    fi
     APPS="\$(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits || true)"
     echo "Compute apps: \${APPS:-<none>}"
-    if [[ -n "\${APPS}" ]]; then BUSY=1; fi
+    if [[ -n "\${APPS}" ]] && [[ "\${APPS}" != *"No running"* ]] && [[ "\${APPS}" != *"Not Supported"* ]]; then
+        BUSY=1
+    fi
     while IFS=, read -r _idx _name mem_used _mem_tot util _temp; do
-        mem_used="\$(echo "\${mem_used:-0}" | xargs | cut -d. -f1)"
-        util="\$(echo "\${util:-0}" | xargs | cut -d. -f1)"
-        if [[ "\${mem_used:-0}" -gt "${MAX_IDLE_GPU_MEM_MB}" ]] || [[ "\${util:-0}" -gt "${MAX_IDLE_GPU_UTIL_PCT}" ]]; then
+        mem_used="\$(echo "\${mem_used:-0}" | tr -cd '0-9')"
+        util="\$(echo "\${util:-0}" | tr -cd '0-9')"
+        mem_used="\${mem_used:-0}"
+        util="\${util:-0}"
+        if [[ "\${mem_used}" -gt "${MAX_IDLE_GPU_MEM_MB}" ]] || [[ "\${util}" -gt "${MAX_IDLE_GPU_UTIL_PCT}" ]]; then
             BUSY=1
         fi
     done < <(nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader,nounits)
 else
     echo "nvidia-smi not found"
 fi
+if [[ -n "\${IDLE_OTHER_USERS}" ]]; then
+    echo "[WARN] Idle login session(s) detected (\${IDLE_OTHER_USERS}) — 0 active CPU/GPU tasks; continuing."
+fi
 if [[ "${REQUIRE_EXCLUSIVE}" == "1" ]]; then
-    if [[ -n "\${OTHER_USERS}" ]]; then
-        echo "ERROR: Other user(s) logged in: \${OTHER_USERS}" >&2
+    if [[ -n "\${ACTIVE_OTHER_USERS}" ]]; then
+        echo "ERROR: Active user(s) on server: \${ACTIVE_OTHER_USERS}" >&2
         exit 2
     fi
     if [[ "\${BUSY}" == "1" ]]; then
@@ -371,7 +400,7 @@ EOF
 
     *)
         echo "Unknown subcommand: ${SUBCMD}" >&2
-        echo "Valid subcommands: check setup-ssh-key sync setup preflight run status logs pull" >&2
+        echo "Valid subcommands: check users setup-ssh-key sync setup preflight run status logs pull" >&2
         exit 1
         ;;
 esac

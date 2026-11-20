@@ -68,9 +68,40 @@ def test_parse_nvidia_status_compute_apps_and_who():
     assert apps[0]["pid"] == 222
     assert apps[0]["used_memory_mb"] == 24000
 
-    who_out = "root     pts/0        2026-11-19 10:00 (10.0.0.5)\nalice    pts/1        2026-11-19 10:05 (10.0.0.8)\n"
+    who_out = (
+        "root     pts/0        2026-11-19 10:00 (10.0.0.5)\n"
+        "alice    pts/1        2026-11-19 10:05 (10.0.0.8)\n"
+        "shubhranshu seat0     2026-10-21 15:56 (login screen)\n"
+        "shubhranshu :1        2026-10-21 15:56 (:1)\n"
+    )
     assert parse_who_users(who_out, current_user="root") == ["alice"]
     assert parse_who_users(who_out, current_user="alice") == ["root"]
+    assert parse_who_users(who_out, current_user="root", ignore_idle_display=False) == [
+        "alice",
+        "shubhranshu",
+    ]
+
+
+def test_parse_nvidia_gb10_unified_memory_na(monkeypatch):
+    gb10_basic = "0, NVIDIA GB10, [N/A]\n"
+    gpus_local = parse_nvidia_smi(gb10_basic)
+    assert len(gpus_local) == 1
+    assert gpus_local[0].index == 0
+    assert gpus_local[0].name == "NVIDIA GB10"
+    assert gpus_local[0].memory_total_mb > 0
+
+    monkeypatch.setattr("minorsafe.hardware._unified_system_memory_mb", lambda: 122880)
+    gpus = parse_nvidia_smi(gb10_basic)
+    assert choose_profile(gpus) == "gpu_80gb"
+
+    gb10_status = "0, NVIDIA GB10, [N/A], [N/A], 0 %, 32\n"
+    statuses = parse_nvidia_smi_status(gb10_status)
+    assert len(statuses) == 1
+    assert statuses[0].name == "NVIDIA GB10"
+    assert statuses[0].memory_total_mb == 122880
+    assert statuses[0].memory_used_mb == 0
+    assert statuses[0].utilization_pct == 0
+    assert statuses[0].temperature_c == 32
 
 
 def test_check_server_exclusivity_cases(tmp_path: Path):

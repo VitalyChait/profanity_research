@@ -49,11 +49,38 @@ class ExclusivityReport:
         return asdict(self)
 
 
-def _safe_int(val: str, default: int = 0) -> int:
+def _unified_system_memory_mb(default_mb: int = 122880) -> int:
+    """Read MemTotal from /proc/meminfo for unified-memory GPUs (e.g. NVIDIA GB10) where nvidia-smi prints [N/A]."""
     try:
-        return int(float(val.strip()))
-    except (TypeError, ValueError, AttributeError):
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemTotal:"):
+                toks = line.split()
+                if len(toks) >= 2:
+                    return max(1024, int(toks[1]) // 1024)
+    except Exception:
+        pass
+    return default_mb
+
+
+def _safe_int(val: str, default: int = 0) -> int:
+    if not isinstance(val, str):
         return default
+    cleaned = val.strip().replace("%", "").strip()
+    if not cleaned or "N/A" in cleaned.upper():
+        return default
+    try:
+        return int(float(cleaned))
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_mem_total_mb(raw: str) -> int | None:
+    try:
+        return int(float(raw.strip()))
+    except (TypeError, ValueError):
+        if isinstance(raw, str) and "N/A" in raw.upper():
+            return _unified_system_memory_mb()
+        return None
 
 
 def parse_nvidia_smi(output: str) -> list[GPUInfo]:
@@ -64,9 +91,13 @@ def parse_nvidia_smi(output: str) -> list[GPUInfo]:
         if len(parts) < 3:
             continue
         try:
-            gpus.append(GPUInfo(int(parts[0]), parts[1], int(float(parts[2]))))
+            idx = int(parts[0])
         except ValueError:
             continue
+        mem_tot = _parse_mem_total_mb(parts[2])
+        if mem_tot is None:
+            continue
+        gpus.append(GPUInfo(idx, parts[1], mem_tot))
     return gpus
 
 
@@ -79,10 +110,12 @@ def parse_nvidia_smi_status(output: str) -> list[GPUStatus]:
             continue
         try:
             idx = int(parts[0])
-            name = parts[1]
-            mem_tot = int(float(parts[2]))
         except ValueError:
             continue
+        mem_tot = _parse_mem_total_mb(parts[2])
+        if mem_tot is None:
+            continue
+        name = parts[1]
         mem_used = _safe_int(parts[3], 0) if len(parts) > 3 else 0
         util = _safe_int(parts[4], 0) if len(parts) > 4 else 0
         temp = _safe_int(parts[5], 0) if len(parts) > 5 else 0
@@ -209,14 +242,24 @@ def _resolve_current_user(current_user: str | None = None) -> str:
     return getpass.getuser()
 
 
-def parse_who_users(output: str, current_user: str | None = None) -> list[str]:
-    """Parse ``who`` output and return sorted unique usernames other than ``current_user``."""
+def parse_who_users(
+    output: str, current_user: str | None = None, ignore_idle_display: bool = True
+) -> list[str]:
+    """Parse ``who`` output and return sorted unique usernames other than ``current_user``.
+
+    When ``ignore_idle_display`` is true, local GUI/display-manager seats (``seat0``, ``:0``, ``:1``,
+    ``(login screen)``) are ignored so stale desktop sessions on shared lab hosts do not look active.
+    """
     me = _resolve_current_user(current_user)
     others: set[str] = set()
     for line in output.strip().splitlines():
         toks = line.split()
         if not toks:
             continue
+        if ignore_idle_display:
+            tty = toks[1] if len(toks) > 1 else ""
+            if tty in ("seat0", ":0", ":1") or "(login screen)" in line or "(:" in line:
+                continue
         user = toks[0]
         if user and user != me:
             others.add(user)
@@ -305,6 +348,27 @@ def check_server_exclusivity(
         who_text = ""
 
     other_users = parse_who_users(who_text, current_user=me)
+    if _who_out is None and other_users and shutil.which("ps") is not None:
+        try:
+            ps_out = subprocess.check_output(["ps", "-eo", "user=,pcpu="], text=True, timeout=10)
+            active_cpu_users: set[str] = set()
+            for ln in ps_out.splitlines():
+                ptoks = ln.split()
+                if len(ptoks) >= 2:
+                    try:
+                        if float(ptoks[1]) >= 5.0:
+                            active_cpu_users.add(ptoks[0])
+                    except ValueError:
+                        continue
+            idle_users = [u for u in other_users if u not in active_cpu_users]
+            if idle_users:
+                log.warning(
+                    "Idle logged-in user(s) with <5%% CPU ignored for exclusivity: %s",
+                    ", ".join(idle_users),
+                )
+            other_users = [u for u in other_users if u in active_cpu_users]
+        except Exception:  # pragma: no cover
+            pass
     resolved_lock = Path(lock_path) if lock_path else (REPO_ROOT / ".minorsafe.lock")
     active_lock = _read_active_lock(resolved_lock)
 

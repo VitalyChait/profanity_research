@@ -163,4 +163,3 @@ def save_pairs(pairs: list[ContrastivePair], path: str | Path) -> None:
 
 def load_pairs(path: str | Path) -> list[ContrastivePair]:
     return df_to_pairs(pd.read_parquet(path))
-

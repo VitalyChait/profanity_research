@@ -37,7 +37,8 @@ done
 DRY="${DRY_RUN:-0}"
 ENV_FILE="${REMOTE_ENV_FILE:-${REPO_ROOT}/.remote.env}"
 
-echo "=== [1/4] Git Hooks & Credential Safety ==="
+echo "=== [1/4] Pre-Setup Snapshot, Git Hooks & Credential Safety ==="
+DRY_RUN="${DRY}" bash "${REPO_ROOT}/scripts/snapshot_versions.sh" "${REPO_ROOT}/results/logs" "local_pre_setup"
 if [[ "${DRY}" == "1" ]]; then
     echo "[setup] DRY_RUN: bash scripts/install_git_hooks.sh"
 else
