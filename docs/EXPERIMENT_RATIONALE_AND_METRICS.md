@@ -85,7 +85,8 @@ Each benchmark phase isolates a distinct scientific question, method subset, or 
 - **Hypotheses tested:** **H10** (`SRI(int8, transferred) >= 0.95` and `SRI(4-bit, transferred) < SRI(4-bit, native)`), **Fig. 8**.
 
 ### 2.9 `multiturn` (`configs/experiments/multiturn.yaml`, 44 runs, `dev` split — Optional Extension)
-- **Rationale:** Excluded from `make main` per `Decision 5` (`plan.md`), available for follow-up analysis of 5–8 turn conversational drift and `SwFC` cross-turn collapse vs. `StTP` and `m3_probe_guard` early warning across `M`/`L` models (`max_examples=60`).
+- **Rationale:** Excluded from `make main` per `Decision 5` (`plan.md`), available for follow-up analysis of 5–7 turn conversational drift and `SwFC` cross-turn collapse vs. `StTP` and `m3_probe_guard` early warning across `M`/`L` models.
+- **Data:** `eval_set: multiturn_drift` evaluates the scripted dialogues in `src/minorsafe/data/multiturn.py` rather than `data/processed`. Each method answers the final, drifted user turn with the whole conversation as context. There are currently only **2 distinct dialogues**, so the run is a smoke-level check, not a statistically meaningful study. Per-turn metrics (cross-turn repetition growth, probe early-warning lead time) are not implemented; the run reports the standard metrics on the final turn.
 
 ### 2.10 Human Annotation Calibration (`minorsafe judge export-human --n 150` & `agreement`)
 - **Rationale:** Automated `LLMJudge` scores scale evaluation to hundreds of thousands of responses, so Decision 6 validates judge trustworthiness against human judgment on **150 method-blinded stratified responses** (`profanity`, `obfuscated`, `slang`, `complex_lexicon`, `benign_tricky`, etc.).

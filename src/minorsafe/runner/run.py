@@ -25,6 +25,7 @@ from minorsafe.config import (
     load_prompts,
 )
 from minorsafe.data.build import build_dataset, ensure_dataset, stale_data_accepted
+from minorsafe.data.multiturn import build_multiturn_drift_dialogues
 from minorsafe.data.schema import Example, load_examples, load_pairs
 from minorsafe.data.splits import stratified_subsample as _stratified_subsample
 from minorsafe.eval.capability import evaluate_capability_retention
@@ -43,6 +44,7 @@ from minorsafe.utils import (
     git_sha,
     package_versions,
     read_json,
+    stable_hash,
     write_json,
 )
 
@@ -98,28 +100,44 @@ def _output_to_row(
     return row
 
 
-def check_shard_dataset(run_dir: Path, n_done: int, data_digest: str | None, *, strict: bool) -> None:
+def check_shard_dataset(
+    run_dir: Path,
+    n_done: int,
+    data_digest: str | None,
+    *,
+    strict: bool,
+    eval_digest: str | None = None,
+) -> None:
     """Refuse to resume a run shard whose stored responses came from a different dataset.
 
     Resuming would append rows generated from the current ``data/processed`` to rows generated from
-    an earlier build, so one shard would silently mix two datasets. The check is skipped when the shard
-    holds no responses yet.
+    an earlier build, so one shard would silently mix two datasets. ``eval_digest`` covers evaluation
+    examples that don't come from ``data/processed`` (the multi-turn dialogues). The check is skipped when
+    the shard holds no responses yet.
     """
     manifest_path = run_dir / "manifest.json"
     if n_done == 0 or not manifest_path.exists():
         return
     try:
-        recorded = read_json(manifest_path).get("data_digest")
+        manifest = read_json(manifest_path)
+        recorded, recorded_eval = manifest.get("data_digest"), manifest.get("eval_digest")
     except (OSError, ValueError, AttributeError):
-        recorded = None
-    if recorded == data_digest:
+        recorded = recorded_eval = None
+    if recorded == data_digest and recorded_eval == eval_digest:
         return
-    origin = "a dataset with no recorded digest" if recorded is None else f"dataset {recorded}"
-    msg = (
-        f"Run shard {run_dir} holds {n_done} responses generated from {origin}, but data/processed is now "
-        f"dataset {data_digest}. Resuming would mix two datasets in one shard; move the shard (or "
-        "results/runs) aside and re-run it."
-    )
+    if recorded != data_digest:
+        origin = "a dataset with no recorded digest" if recorded is None else f"dataset {recorded}"
+        msg = (
+            f"Run shard {run_dir} holds {n_done} responses generated from {origin}, but data/processed is "
+            f"now dataset {data_digest}. Resuming would mix two datasets in one shard; move the shard (or "
+            "results/runs) aside and re-run it."
+        )
+    else:
+        msg = (
+            f"Run shard {run_dir} holds {n_done} responses to evaluation set {recorded_eval}, but the "
+            f"experiment's evaluation set is now {eval_digest}. Resuming would mix the two in one shard; "
+            "move the shard aside and re-run it."
+        )
     if strict and not stale_data_accepted():
         raise RuntimeError(msg)
     log.warning(msg)
@@ -168,7 +186,16 @@ def run_experiment(
     all_examples = load_examples(proc_dir / "examples.parquet")
     all_pairs = load_pairs(proc_dir / "pairs.parquet")
 
-    split_examples = [e for e in all_examples if e.split == exp.split]
+    if exp.eval_set == "multiturn_drift":
+        eval_pool = build_multiturn_drift_dialogues()
+        eval_digest: str | None = stable_hash([e.model_dump(mode="json") for e in eval_pool], 16)
+    else:
+        eval_pool, eval_digest = all_examples, None
+    split_examples = [e for e in eval_pool if e.split == exp.split]
+    if eval_digest is not None and not split_examples:
+        raise ValueError(
+            f"Experiment {exp.name!r}: the {exp.eval_set} dialogues are not in split {exp.split!r}"
+        )
     if exp.categories:
         cat_set = set(exp.categories)
         split_examples = [e for e in split_examples if any(c in cat_set for c in e.categories)]
@@ -215,6 +242,8 @@ def run_experiment(
                 "hardware_profile": profile.name,
                 "data_digest": data_digest,
                 "data_fingerprint": data_fingerprint,
+                "eval_set": exp.eval_set,
+                "eval_digest": eval_digest,
                 "run_spec": asdict(rspec),
                 "status": status,
                 "updated_at": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
@@ -268,7 +297,9 @@ def run_experiment(
                 need_cap = bool(exp.capability_eval and not (run_dir / "capability.json").exists())
 
                 if pending or need_cap:
-                    check_shard_dataset(run_dir, len(done), data_digest, strict=strict_data)
+                    check_shard_dataset(
+                        run_dir, len(done), data_digest, strict=strict_data, eval_digest=eval_digest
+                    )
                     _write_manifest(run_dir, rspec, "running")
                     ctx = RunContext(
                         hardware=profile,

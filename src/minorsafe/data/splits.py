@@ -18,7 +18,7 @@ from minorsafe.utils import normalize_text
 
 T = TypeVar("T", Example, ContrastivePair)
 
-# Counter suffixes appended by the seed / neologism / multiturn builders to pad the corpus with copies.
+# Counter suffixes appended by the seed / neologism builders to pad the corpus with copies.
 _COPY_SUFFIX_RE = re.compile(r"\s*(?:\[(?:item|case)\s+\d+\]|\(#\d+\))\s*$", re.IGNORECASE)
 
 

@@ -107,7 +107,10 @@ def test_split_reasoning_and_chat_generator_telemetry(dummy_lm, dummy_tokenizer)
 def test_gpu_sampler_cpu_safe():
     with GPUSampler(interval_s=0.01) as s:
         time.sleep(0.02)
-    assert s.energy_j >= 0.0
+    if s.available and s.failure is None:
+        assert s.energy_j >= 0.0
+    else:
+        assert math.isnan(s.energy_j)  # unmeasured energy is NaN, never 0 J (M10)
     assert s.peak_mem_mb >= 0.0
 
 

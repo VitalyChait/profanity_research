@@ -14,6 +14,11 @@ set -euo pipefail
 
 PROFILE="${PROFILE:-gpu_80gb}"
 # Phase names accepted by scripts/run_phase.sh (keep --array in sync with this list).
+# The tasks run concurrently, each on the GPU SLURM gave it. Inside a SLURM job MinorSafe takes a per-job
+# run lock (.minorsafe.locks/slurm_<job id>.lock) instead of the repo-wide .minorsafe.lock, and doesn't
+# require the node to be free of other users, so tasks sharing a node don't abort each other.
+# Tasks that share a node also share its CPUs and memory bandwidth, which can shift latency numbers; add
+# `#SBATCH --exclusive` (one task per node) or throttle the array with `%1` if timings must not overlap.
 EXPERIMENTS=("main" "guards" "recomposition" "subculture" "rampup" "quant")
 IDX="${SLURM_ARRAY_TASK_ID:-0}"
 EXP="${EXPERIMENTS[${IDX}]}"

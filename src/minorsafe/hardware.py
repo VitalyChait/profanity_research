@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import getpass
+import json
 import os
 import shutil
 import socket
@@ -14,7 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from minorsafe.utils import REPO_ROOT, get_logger, package_versions, read_json, write_json
+from minorsafe.utils import REPO_ROOT, get_logger, package_versions
 
 log = get_logger(__name__)
 
@@ -338,19 +339,62 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _read_active_lock(lock_path: Path) -> dict[str, Any] | None:
-    if not lock_path.exists():
-        return None
+# --------------------------------------------------------------------------- run lock
+_LOCK_WRITE_GRACE_S = 30.0  # an unreadable lock this young may still be being written
+_HELD_LOCKS: set[Path] = set()  # locks this process holds through acquire_run_lock
+
+
+def slurm_job_id() -> str | None:
+    """The SLURM job this process runs in (each array task has its own id), or None outside SLURM."""
+    return os.environ.get("SLURM_JOB_ID", "").strip() or None
+
+
+def default_lock_path(root: Path | None = None) -> Path:
+    """Where the MinorSafe run lock lives.
+
+    Outside a scheduler a run claims the whole server, so every run shares one repo-wide lock. Under SLURM
+    the scheduler already gives each job its own GPUs, and jobs can share a node and the repo's file system
+    (``scripts/slurm/run_grid.sbatch`` starts six phases at once). Each job then locks only its own
+    allocation, so concurrent jobs don't abort each other.
+    """
+    base = Path(root) if root else REPO_ROOT
+    job = slurm_job_id()
+    return base / ".minorsafe.lock" if job is None else base / ".minorsafe.locks" / f"slurm_{job}.lock"
+
+
+def _lock_holder(lock_path: Path) -> tuple[str, dict[str, Any], str]:
+    """Classify a lock file as ``free``, ``mine`` (this PID), ``held`` or ``stale``.
+
+    Returns (state, holder payload, raw file text). A lock is live while its PID runs on this host. A lock
+    taken on another host counts as live, because its PID can't be checked from here.
+    """
     try:
-        data = read_json(lock_path)
-    except Exception:
-        return None
+        raw = lock_path.read_text(encoding="utf-8")
+        mtime = lock_path.stat().st_mtime
+    except FileNotFoundError:
+        return "free", {}, ""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        data = None
     if not isinstance(data, dict):
-        return None
+        young = time.time() - mtime < _LOCK_WRITE_GRACE_S
+        return ("held" if young else "stale"), {"pid": None, "phase": "unknown (unreadable lock file)"}, raw
+    host = data.get("host")
+    if host and host != socket.gethostname():
+        return "held", data, raw
     pid = data.get("pid")
-    if isinstance(pid, int) and pid != os.getpid() and _pid_alive(pid):
-        return data
-    return None
+    if not isinstance(pid, int):
+        return "stale", data, raw
+    if pid == os.getpid():
+        return "mine", data, raw
+    return ("held" if _pid_alive(pid) else "stale"), data, raw
+
+
+def _read_active_lock(lock_path: Path) -> dict[str, Any] | None:
+    """The payload of a live lock held by another process, or None."""
+    state, holder, _ = _lock_holder(lock_path)
+    return holder if state == "held" else None
 
 
 def check_server_exclusivity(
@@ -365,8 +409,13 @@ def check_server_exclusivity(
     _nvidia_apps_out: str | None = None,
     _who_out: str | None = None,
 ) -> ExclusivityReport:
-    """Validate that target GPU(s), host users (unless shared_host), and run locks are clear."""
+    """Validate that target GPU(s), host users (unless shared_host), and run locks are clear.
+
+    Inside a SLURM job the node is shared by design: the scheduler hands out the GPUs, so other users on the
+    node are not checked (as with ``shared_host``) and the lock checked is this job's own.
+    """
     me = _resolve_current_user(current_user)
+    shared_host = shared_host or slurm_job_id() is not None
     target_indices = gpu_indices if gpu_indices is not None else visible_gpu_indices()
 
     if _nvidia_apps_out is not None:
@@ -443,7 +492,7 @@ def check_server_exclusivity(
             other_users = [u for u in other_users if u in active_cpu_users]
         except Exception:  # pragma: no cover
             pass
-    resolved_lock = Path(lock_path) if lock_path else (REPO_ROOT / ".minorsafe.lock")
+    resolved_lock = Path(lock_path) if lock_path else default_lock_path()
     active_lock = _read_active_lock(resolved_lock)
 
     reasons: list[str] = []
@@ -483,30 +532,88 @@ def check_server_exclusivity(
     )
 
 
+def _create_lock(lock_path: Path, payload: dict[str, Any]) -> bool:
+    """Create the lock file holding ``payload`` atomically; False when it already exists."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+    return True
+
+
+def _remove_stale_lock(lock_path: Path, seen: str) -> None:
+    """Delete the stale lock whose text was ``seen``, unless another process has replaced it since.
+
+    Two processes can find the same stale lock. The first removes it and creates its own, and the second
+    must not then delete that fresh lock. So the file is first renamed aside (atomic), deleted if it is
+    still the stale one, and otherwise put back.
+    """
+    aside = lock_path.with_name(f"{lock_path.name}.{os.getpid()}.{time.time_ns()}.stale")
+    try:
+        os.rename(lock_path, aside)
+    except FileNotFoundError:
+        return
+    try:
+        if aside.read_text(encoding="utf-8") != seen and not lock_path.exists():
+            os.rename(aside, lock_path)
+    finally:
+        aside.unlink(missing_ok=True)
+
+
+def _lock_conflict(lock_path: Path, holder: dict[str, Any]) -> str:
+    msg = f"Another MinorSafe process holds {lock_path}: {holder}"
+    host = holder.get("host")
+    if host and host != socket.gethostname():
+        msg += (
+            f". It was taken on host {host!r}, where its PID can't be checked from here; delete the file if "
+            "that run has ended."
+        )
+    return msg
+
+
 @contextlib.contextmanager
 def acquire_run_lock(lock_path: Path | None = None, phase: str = "run"):
-    """Acquire an exclusive PID lockfile for the duration of a MinorSafe run."""
-    resolved = Path(lock_path) if lock_path else (REPO_ROOT / ".minorsafe.lock")
-    existing = _read_active_lock(resolved)
-    if existing is not None:
-        raise RuntimeError(f"Another MinorSafe process holds {resolved}: {existing}")
+    """Hold the MinorSafe run lock for the duration of a run.
+
+    The lock file is created with ``O_CREAT | O_EXCL``, so of two runs starting together exactly one wins.
+    A lock left by a run that died on this host (its PID is gone) is replaced. Under SLURM the lock covers
+    only this job's allocation (see ``default_lock_path``).
+    """
+    resolved = Path(lock_path) if lock_path else default_lock_path()
+    key = resolved.resolve()
     payload = {
         "pid": os.getpid(),
         "user": _resolve_current_user(),
         "host": socket.gethostname(),
         "phase": phase,
         "started_at": time.time(),
+        "slurm_job_id": slurm_job_id(),
     }
-    write_json(resolved, payload)
+    for _ in range(5):
+        if _create_lock(resolved, payload):
+            break
+        state, holder, raw = _lock_holder(resolved)
+        if state == "held":
+            raise RuntimeError(_lock_conflict(resolved, holder))
+        if state == "mine" and key in _HELD_LOCKS:
+            raise RuntimeError(f"This process already holds {resolved} (nested run lock)")
+        if state in ("stale", "mine"):  # "mine" here: left by an earlier process that had our PID
+            log.warning("Removing stale MinorSafe run lock %s: %s", resolved, holder)
+            _remove_stale_lock(resolved, raw)
+    else:
+        raise RuntimeError(f"Could not take {resolved}: other processes kept replacing it")
+    _HELD_LOCKS.add(key)
     try:
         yield resolved
     finally:
+        _HELD_LOCKS.discard(key)
         try:
-            if resolved.exists():
-                cur = read_json(resolved)
-                if isinstance(cur, dict) and cur.get("pid") == os.getpid():
-                    resolved.unlink()
-        except Exception:
+            if json.loads(resolved.read_text(encoding="utf-8")) == payload:
+                resolved.unlink()
+        except (OSError, ValueError):
             pass
 
 
@@ -612,7 +719,7 @@ def run_preflight_checks(
     cred = check_credential_safety(root)
     excl = check_server_exclusivity(
         max_idle_mem_mb=1024 if hw.shared_host else 500,
-        lock_path=root / ".minorsafe.lock",
+        lock_path=default_lock_path(root),
         gpu_indices=target_indices,
         shared_host=hw.shared_host,
     )

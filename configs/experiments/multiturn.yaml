@@ -1,7 +1,7 @@
 name: multiturn
-description: "Optional extension (not core): 5-8 turn gradual conversational drift and internal probe early-warning detection."
+description: "Optional extension (not core): 5-7 turn gradual conversational drift dialogues (data/multiturn.py); each method answers the final, drifted user turn with the whole conversation as context."
 split: dev
-max_examples: 60
+eval_set: multiturn_drift
 seeds: [0]
 age_bands: ["teen_12_18"]
 temperature: 0.0

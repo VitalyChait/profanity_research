@@ -148,6 +148,9 @@ class ExperimentSpec(StrictModel):
     name: str
     description: str = ""
     split: Literal["calib", "dev", "test"] = "dev"
+    # Where the evaluated examples come from: data/processed, or the scripted multi-turn drift dialogues of
+    # minorsafe.data.multiturn. Calibration data (pairs, calib/dev examples) always comes from data/processed.
+    eval_set: Literal["processed", "multiturn_drift"] = "processed"
     categories: list[str] | None = None  # filter Examples by category (None = all)
     max_examples: int | None = None
     max_examples_per_category: int | None = None

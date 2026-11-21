@@ -46,7 +46,7 @@ class MethodOutput:
     e2e_ms: float = 0.0
     decode_tok_per_s: float = 0.0
     effective_tok_per_s: float = 0.0
-    # NaN = not measured (GPUSampler not yet wired). Never report fake zeros.
+    # NaN = not measured (no GPU, or GPUSampler could not measure the batch). Never report fake zeros.
     energy_j: float = float("nan")
     peak_vram_mb: float = float("nan")
     extra: dict = field(default_factory=dict)

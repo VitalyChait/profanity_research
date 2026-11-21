@@ -186,6 +186,7 @@ run_rsync_push() {
         --exclude='id_ed25519*'
         --exclude='id_rsa*'
         --exclude=.minorsafe.lock
+        --exclude=.minorsafe.locks
         --exclude=/data/
         --exclude=/results/
         --exclude=/models_cache/

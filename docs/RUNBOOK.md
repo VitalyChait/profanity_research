@@ -133,6 +133,13 @@ sbatch --export=ALL,PROFILE=gpu_80gb scripts/slurm/run_grid.sbatch
 
 Array tasks `0-5` map to phases `main guards recomposition subculture rampup quant`. Run `make data` before submitting, and `make analyze` after all tasks finish.
 
+The six tasks run at the same time. Inside a SLURM job, SLURM decides who gets which GPU, so MinorSafe adapts its exclusivity rules:
+- **Lock:** each job takes its own run lock, `.minorsafe.locks/slurm_<job id>.lock`, instead of the repo-wide `.minorsafe.lock`.
+- **Other users:** other users on the node are not checked.
+- **GPU:** the allocated GPU must still be idle at start.
+
+Tasks that share a node also share its CPUs and memory bandwidth, which can shift latency numbers. If timings must not overlap, add `#SBATCH --exclusive` or submit with `--array=0-5%1`.
+
 ---
 
 ## 4. Human Annotation Calibration (150 Samples)
@@ -166,7 +173,7 @@ Outputs in `results/`:
 | Symptom | Cause / Fix |
 | :--- | :--- |
 | `Cannot reach <host>:<port>` | Ensure University VPN is connected and verify `REMOTE_HOST` / `REMOTE_PORT` in `.remote.env`. |
-| `Server/GPU is not exclusive` / `minorsafe preflight` fails | Another user is logged in (`who`), a foreign GPU process is running, or `.minorsafe.lock` is active. Run `make remote-check` to inspect; override only intentionally with `--allow-busy` or `MINORSAFE_ALLOW_BUSY=1`. |
+| `Server/GPU is not exclusive` / `minorsafe preflight` fails | Another user is logged in (`who`), a foreign GPU process is running, or `.minorsafe.lock` is active (under SLURM: `.minorsafe.locks/slurm_<job id>.lock`). A lock left by a crashed run on the same host is replaced automatically; a lock taken on another host is never assumed dead, so delete it by hand once that run has ended. Run `make remote-check` to inspect; override only intentionally with `--allow-busy` or `MINORSAFE_ALLOW_BUSY=1`. |
 | `PlaceholderBackendError: ... is a CPU placeholder` | Only raised if a placeholder helper (e.g., `mlm_substitute` without `MLMRecomposer`) is invoked while `allow_placeholders: false`. Ensure the real backend (`MLMRecomposer`, etc.) is initialized and never set `allow_placeholders: true` on reported GPU runs. |
 | `PermissionError: ... targets the 'test' split` | Run via `run_phase.sh` (adds `--final` for test-split configs) or pass `--final` explicitly. |
 | `ValueError: No calibration pairs for steering concept ...` | The data build produced no pairs for a configured concept; check `results/data_card.md` and the method's `concepts`. |
