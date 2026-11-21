@@ -26,7 +26,9 @@ AUTO_ARGS=(--with-tomography)
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --keep-data)
+            # Keep data/processed and tell autopilot to use it even if it is stale.
             RESET_ARGS+=(--keep-data)
+            AUTO_ARGS+=(--keep-data)
             ;;
         --skip-setup|--skip-tests|--skip-download|--skip-pilot|--skip-quant)
             AUTO_ARGS+=("$1")

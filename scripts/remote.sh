@@ -559,12 +559,12 @@ EOF
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --skip-setup) SKIP_SETUP=1 ;;
-                --skip-tests|--skip-download|--skip-pilot|--skip-quant|--with-tomography)
+                --skip-tests|--skip-download|--skip-pilot|--skip-quant|--with-tomography|--rebuild-data|--keep-data)
                     AUTO_ARGS+=("$1")
                     ;;
                 *)
                     echo "Unknown autopilot option: $1" >&2
-                    echo "Usage: bash scripts/remote.sh autopilot [profile] [--skip-setup] [--skip-tests] [--skip-download] [--skip-pilot] [--skip-quant] [--with-tomography]" >&2
+                    echo "Usage: bash scripts/remote.sh autopilot [profile] [--skip-setup] [--skip-tests] [--skip-download] [--skip-pilot] [--skip-quant] [--with-tomography] [--rebuild-data | --keep-data]" >&2
                     exit 1
                     ;;
             esac

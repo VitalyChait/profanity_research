@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import torch
@@ -10,13 +11,19 @@ from torch.utils.data import DataLoader, TensorDataset
 from minorsafe.config import ModelSpec
 from minorsafe.data.schema import ContrastivePair, Example
 from minorsafe.eval.detection import calibrate_f1_threshold
-from minorsafe.registry import free_model, load_encoder_classifier
+from minorsafe.registry import compute_dtype, free_model, load_encoder_classifier
 from minorsafe.telemetry.cost import SetupReport
 from minorsafe.utils import get_logger, read_json, seed_everything, stable_hash, write_json
 
 log = get_logger(__name__)
 
 _SAFETY_PAIR_CONCEPTS = {"profanity", "mature_theme", "slang_toxic"}
+
+# Training numerics, part of the checkpoint cache key so checkpoints trained another way are never reused.
+# Weights are fp32 master copies; only the forward pass runs in bf16/fp16 autocast. Pure-bf16 weights would
+# drop most AdamW updates at lr ~3e-5: an update below half a bf16 ulp rounds back to the old value
+# (claude_issues_found.md H5).
+TRAIN_PRECISION = "fp32_master_amp"
 
 
 def _build_encoder_training_data(
@@ -73,9 +80,29 @@ def _score_classifier_batch(
 def encoder_setup_key(
     model_alias: str, *, quant: str, n_calib: int, epochs: int, lr: float, batch_size: int, seed: int
 ) -> str:
-    """Guard checkpoint cache key; ``quant`` sets the training dtype, batch size and seed change the head."""
-    cfg_hash = stable_hash({"batch_size": batch_size, "seed": seed}, length=6)
+    """Guard checkpoint cache key.
+
+    ``quant`` sets the autocast and deployment dtype. Batch size, seed and the training precision
+    scheme also change the trained weights.
+    """
+    cfg_hash = stable_hash({"batch_size": batch_size, "seed": seed, "precision": TRAIN_PRECISION}, length=6)
     return f"enc_{model_alias}_{quant}_N{n_calib}_ep{epochs}_lr{lr:g}_{cfg_hash}"
+
+
+def training_autocast_dtype(quant: str, device: str) -> torch.dtype | None:
+    """Half-precision compute dtype for the training forward pass, or None for plain fp32."""
+    dtype = compute_dtype(quant, device)
+    return dtype if dtype in (torch.bfloat16, torch.float16) else None
+
+
+def cast_for_deployment(model, quant: str, device: str):
+    """Cast trained fp32 weights to the dtype ``load_encoder_classifier`` serves this quant in.
+
+    The dev threshold is then calibrated on the weights the guard actually runs with, and the
+    checkpoint is saved in that dtype. For int8/nf4 the guard is quantized from these bf16 weights at load.
+    """
+    dtype = compute_dtype(quant, device)
+    return model.to(dtype) if dtype != torch.float32 else model
 
 
 def train_encoder_guard(
@@ -129,9 +156,12 @@ def train_encoder_guard(
         )
 
     rep = SetupReport(method=f"m1_enc_{model_spec.alias}", setup_key=setup_key)
-    model, tok, _ = load_encoder_classifier(model_spec, num_labels=2, device=device, quant=quant)
+    # fp32 master weights regardless of ``quant``; ``quant`` only picks the autocast/deployment dtype.
+    model, tok, _ = load_encoder_classifier(model_spec, num_labels=2, device=device, quant="fp32")
     model.config.id2label = {0: "safe", 1: "unsafe"}
     model.config.label2id = {"safe": 0, "unsafe": 1}
+    amp_dtype = training_autocast_dtype(quant, device)
+    device_type = torch.device(device).type
 
     threshold = 0.50
     try:
@@ -142,6 +172,8 @@ def train_encoder_guard(
                     "n_calib_effective": int(n_calib_effective),
                     "n_pairs_used": int(n_pairs_used),
                     "n_examples_used": int(n_ex_used),
+                    "train_precision": TRAIN_PRECISION,
+                    "autocast_dtype": str(amp_dtype).removeprefix("torch.") if amp_dtype else "none",
                 }
             )
             enc = tok(
@@ -165,6 +197,8 @@ def train_encoder_guard(
             scheduler = torch.optim.lr_scheduler.LinearLR(
                 opt, start_factor=1.0, end_factor=0.1, total_iters=total_steps
             )
+            # fp16 gradients underflow without loss scaling; bf16 has fp32's exponent range and needs none.
+            scaler = torch.amp.GradScaler(device_type) if amp_dtype == torch.float16 else None
 
             model.train()
             for _ in range(max(1, epochs)):
@@ -175,14 +209,29 @@ def train_encoder_guard(
                     y_batch = y_batch.to(device)
 
                     opt.zero_grad(set_to_none=True)
-                    out = model(input_ids=input_ids, attention_mask=attention_mask, labels=y_batch)
-                    loss = out.loss
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-                    opt.step()
+                    autocast = (
+                        torch.autocast(device_type=device_type, dtype=amp_dtype)
+                        if amp_dtype is not None
+                        else contextlib.nullcontext()
+                    )
+                    with autocast:
+                        out = model(input_ids=input_ids, attention_mask=attention_mask, labels=y_batch)
+                    loss = out.loss.float()
+                    if scaler is not None:
+                        scaler.scale(loss).backward()
+                        scaler.unscale_(opt)
+                        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                        scaler.step(opt)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                        opt.step()
                     scheduler.step()
 
+            del opt, scheduler, scaler, trainable  # fp32 Adam state is 2x the weights; free before eval
             model.eval()
+            model = cast_for_deployment(model, quant, device)
             dev_labeled = [e for e in dev_examples if e.label_unsafe is not None]
             if len({int(bool(e.label_unsafe)) for e in dev_labeled}) >= 2:
                 dev_texts = [e.last_user for e in dev_labeled]

@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from minorsafe.config import load_data_spec, load_hardware, load_models
-from minorsafe.data.build import build_dataset
+from minorsafe.config import load_hardware, load_models
+from minorsafe.data.build import ensure_dataset
 from minorsafe.data.schema import ContrastivePair, load_pairs
 from minorsafe.hardware import resolve_profile_name
 from minorsafe.methods.steering.extract import calibrate_hyperplane_from_activations, capture_pair_activations
@@ -188,8 +188,10 @@ def run_tomography_for_profile(
 
     base_data = Path(data_dir) if data_dir else DATA_DIR
     pairs_path = base_data / "processed" / "pairs.parquet"
-    if not pairs_path.exists():
-        build_dataset(load_data_spec(), data_dir=base_data, results_dir=RESULTS_DIR, offline=True)
+    # Same rule as run_experiment: a production GPU run never silently builds or reuses stale data.
+    data_status = ensure_dataset(
+        base_data, strict=hw.device == "cuda" and data_dir is None, results_dir=RESULTS_DIR
+    )
     all_pairs = load_pairs(pairs_path)
     calib_pairs = [p for p in all_pairs if p.split == "calib"]
     eval_pairs = [p for p in all_pairs if p.split in ("dev", "test")]
@@ -215,6 +217,7 @@ def run_tomography_for_profile(
             report["size_group"] = spec.size_group or "S"
             report["params_b"] = float(spec.params_b or 0.0)
             report["quant"] = hw.default_quant
+            report["data_digest"] = data_status.data_digest
             out_path = out_root / f"{alias}.json"
             write_json(out_path, report)
             written.append(out_path)
@@ -231,5 +234,8 @@ def run_tomography_for_profile(
         finally:
             free_model(model, tok)
 
-    write_json(out_root / "summary.json", {"profile": resolved, "models": summaries})
+    write_json(
+        out_root / "summary.json",
+        {"profile": resolved, "data_digest": data_status.data_digest, "models": summaries},
+    )
     return written

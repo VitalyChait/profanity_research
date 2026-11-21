@@ -15,7 +15,7 @@ from minorsafe.analysis.plots import generate_all_figures
 from minorsafe.analysis.report import generate_executive_report
 from minorsafe.analysis.tables import generate_all_tables
 from minorsafe.config import load_age_bands, load_data_spec, load_hardware
-from minorsafe.data.build import build_dataset
+from minorsafe.data.build import build_dataset, check_dataset
 from minorsafe.eval.evaluate import evaluate_responses_df
 from minorsafe.eval.judge import compute_human_agreement, export_human_annotation_sheet
 from minorsafe.hardware import gpu_summary, resolve_profile_name, run_preflight_checks
@@ -137,8 +137,29 @@ def cmd_data_build(
         offline=offline,
         hardware_profile=None if offline else hardware,
         teacher_override=teacher,
+        overrides=list(override or []),
     )
     typer.echo(f"Built {len(examples)} examples and {len(pairs)} pairs. Data card: {card_path}")
+
+
+# Exit code for "data/processed must be rebuilt" (distinct from 1 = the command itself failed).
+DATA_REBUILD_EXIT = 3
+
+
+@data_app.command("status")
+def cmd_data_status(
+    hardware: str = _hardware_option(),
+    offline: bool = typer.Option(False, "--offline", help="Expect an offline (seed-corpus) build."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Check whether data/processed is what `data build` would produce now.
+
+    Exit 0 = current; exit 3 = missing, unrecorded (built before provenance was recorded) or stale
+    (data-building code, data spec, synth prompts, teacher or pair filter changed since the build).
+    """
+    status = check_dataset(DATA_DIR, offline=offline, hardware_profile=None if offline else hardware)
+    typer.echo(json.dumps(status.to_dict(), indent=2) if as_json else status.describe())
+    raise typer.Exit(0 if status.fresh else DATA_REBUILD_EXIT)
 
 
 @data_app.command("report")
@@ -245,7 +266,11 @@ def cmd_tomography(
 
 @app.command("status")
 def cmd_status(runs_dir: Path = typer.Option(RESULTS_DIR / "runs", "--runs", "--runs-dir")) -> None:
-    """Show live run progress (if any) and count completed run shards under results/runs/."""
+    """Show dataset freshness, live run progress (if any) and completed run shards under results/runs/."""
+    try:
+        typer.echo(f"[DATA] {check_dataset(DATA_DIR).describe()}")
+    except Exception as exc:
+        typer.echo(f"[DATA] status unavailable: {exc}")
     live_path = runs_dir.parent / "logs" / "live_status.json"
     if live_path.exists():
         try:

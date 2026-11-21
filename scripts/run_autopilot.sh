@@ -7,12 +7,15 @@ set -euo pipefail
 # Sequence:
 #   1. Full automated test verification (`scripts/run_all_tests.sh`)
 #   2. HF gated-repo check & model cache pre-download (`scripts/download_models.py`)
-#   3. Synthetic & curated dataset build (`scripts/run_phase.sh data`) if not yet built
+#   3. Synthetic & curated dataset build (`scripts/run_phase.sh data`) when data/processed is missing or
+#      stale (`minorsafe data status`: built by older data code/config, built offline, or unrecorded).
+#      If results computed from the old dataset exist, the run stops unless --rebuild-data (archive them
+#      to results/stale_archive/ and rebuild) or --keep-data (use the old dataset anyway) is given.
 #   4. Isolated assumption pilot (`scripts/run_phase.sh pilot` -> archived out of `results/runs/`)
 #   5. Full MSBA benchmark suite + final analysis (`scripts/run_msba.sh`)
 #
 # Usage:
-#   bash scripts/run_autopilot.sh [profile] [--skip-tests] [--skip-download] [--skip-pilot] [--skip-quant] [--with-tomography]
+#   bash scripts/run_autopilot.sh [profile] [--skip-tests] [--skip-download] [--skip-pilot] [--skip-quant] [--with-tomography] [--rebuild-data | --keep-data]
 #
 # Set DRY_RUN=1 to print the planned sequence without executing.
 
@@ -27,6 +30,9 @@ SKIP_DOWNLOAD=0
 SKIP_PILOT=0
 SKIP_QUANT=0
 WITH_TOMO=0
+REBUILD_DATA=0
+KEEP_DATA=0
+USAGE="Usage: bash scripts/run_autopilot.sh [profile] [--skip-tests] [--skip-download] [--skip-pilot] [--skip-quant] [--with-tomography] [--rebuild-data | --keep-data]"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -35,14 +41,22 @@ while [[ $# -gt 0 ]]; do
         --skip-pilot) SKIP_PILOT=1 ;;
         --skip-quant) SKIP_QUANT=1 ;;
         --with-tomography) WITH_TOMO=1 ;;
+        --rebuild-data) REBUILD_DATA=1 ;;
+        --keep-data) KEEP_DATA=1 ;;
         *)
             echo "Unknown option: $1" >&2
-            echo "Usage: bash scripts/run_autopilot.sh [profile] [--skip-tests] [--skip-download] [--skip-pilot] [--skip-quant] [--with-tomography]" >&2
+            echo "${USAGE}" >&2
             exit 1
             ;;
     esac
     shift
 done
+
+if [[ "${REBUILD_DATA}" == "1" && "${KEEP_DATA}" == "1" ]]; then
+    echo "--rebuild-data and --keep-data are mutually exclusive." >&2
+    echo "${USAGE}" >&2
+    exit 1
+fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
@@ -51,6 +65,7 @@ PYTHON="${PYTHON:-${REPO_ROOT}/.venv/bin/python}"
 if [[ ! -x "${PYTHON}" ]]; then
     PYTHON="python3"
 fi
+ACCEPT_ENV_NAME="MINORSAFE_ACCEPT_STALE_DATA"
 
 MSBA_ARGS=()
 if [[ "${SKIP_QUANT}" == "1" ]]; then
@@ -70,7 +85,14 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
     else
         echo "  2) ${PYTHON} scripts/download_models.py --profile ${PROFILE} --check-gates"
     fi
-    echo "  3) bash scripts/run_phase.sh data ${PROFILE} (if data/processed/examples.parquet missing)"
+    if [[ "${KEEP_DATA}" == "1" ]]; then
+        echo "  3) keep data/processed as-is (--keep-data; ${ACCEPT_ENV_NAME}=1); bash scripts/run_phase.sh data ${PROFILE} only if missing"
+    else
+        echo "  3) ${PYTHON} -m minorsafe.cli data status --hardware ${PROFILE}; bash scripts/run_phase.sh data ${PROFILE} if missing or stale"
+        if [[ "${REBUILD_DATA}" == "1" ]]; then
+            echo "     (--rebuild-data: results from the old dataset are archived to results/stale_archive/ first)"
+        fi
+    fi
     if [[ "${SKIP_PILOT}" == "0" ]]; then
         echo "  4) bash scripts/run_phase.sh pilot ${PROFILE} -> archive to results/pilot_archive/"
     fi
@@ -172,10 +194,63 @@ else
     log_msg "Skipping model pre-download (--skip-download)."
 fi
 
-if [[ ! -f "${REPO_ROOT}/data/processed/examples.parquet" ]] || [[ ! -f "${REPO_ROOT}/data/processed/pairs.parquet" ]]; then
-    run_step "data" bash scripts/run_phase.sh data "${PROFILE}"
+# Results that were computed from data/processed (run shards + cached setup artifacts, tomography).
+data_dependents() {
+    local d
+    for d in "${REPO_ROOT}/results/runs" "${REPO_ROOT}/results/tomography"; do
+        if [[ -d "${d}" ]] && [[ -n "$(find "${d}" -type f -print -quit 2>/dev/null)" ]]; then
+            printf '%s\n' "${d#"${REPO_ROOT}"/}"
+        fi
+    done
+}
+
+DATA_FILES_PRESENT=0
+if [[ -f "${REPO_ROOT}/data/processed/examples.parquet" ]] && [[ -f "${REPO_ROOT}/data/processed/pairs.parquet" ]]; then
+    DATA_FILES_PRESENT=1
+fi
+
+if [[ "${KEEP_DATA}" == "1" ]]; then
+    # Runs refuse a stale dataset unless this is set.
+    export "${ACCEPT_ENV_NAME}=1"
+    if [[ "${DATA_FILES_PRESENT}" == "1" ]]; then
+        log_msg "--keep-data: using data/processed as-is without a freshness check (${ACCEPT_ENV_NAME}=1)."
+    else
+        log_msg "--keep-data: no dataset in data/processed to keep; building it."
+        run_step "data" bash scripts/run_phase.sh data "${PROFILE}"
+    fi
 else
-    log_msg "Dataset already built at data/processed/; skipping data phase."
+    CURRENT_STAGE="data_status"
+    set +e
+    DATA_STATUS="$("${PYTHON}" -m minorsafe.cli data status --hardware "${PROFILE}" 2>&1)"
+    DATA_RC=$?
+    set -e
+    if [[ "${DATA_RC}" -eq 0 ]]; then
+        log_msg "Dataset is current; skipping data phase. ${DATA_STATUS}"
+        if [[ "${REBUILD_DATA}" == "1" ]]; then
+            log_msg "--rebuild-data only applies to a missing or stale dataset; nothing to rebuild."
+        fi
+    elif [[ "${DATA_RC}" -eq 3 ]]; then
+        log_msg "Dataset must be (re)built: ${DATA_STATUS}"
+        DEPENDENTS="$(data_dependents)"
+        if [[ -n "${DEPENDENTS}" ]]; then
+            if [[ "${REBUILD_DATA}" != "1" ]]; then
+                log_msg "ERROR: these results were computed from the current data/processed and would be mixed with results from a rebuilt dataset: $(echo "${DEPENDENTS}" | tr '\n' ' ')"
+                log_msg "Re-run with --rebuild-data to archive them to results/stale_archive/ and rebuild, with --keep-data to continue on the existing dataset, or clear them (scripts/remote.sh reset)."
+                exit 1
+            fi
+            ARCHIVE_DIR="${REPO_ROOT}/results/stale_archive/data_${TS}"
+            mkdir -p "${ARCHIVE_DIR}"
+            while IFS= read -r dep; do
+                [[ -n "${dep}" ]] || continue
+                mv "${REPO_ROOT}/${dep}" "${ARCHIVE_DIR}/"
+                log_msg "Archived ${dep} (computed from the old dataset) to ${ARCHIVE_DIR#"${REPO_ROOT}"/}/."
+            done <<< "${DEPENDENTS}"
+        fi
+        run_step "data" bash scripts/run_phase.sh data "${PROFILE}"
+    else
+        log_msg "ERROR: dataset status check failed (exit=${DATA_RC}): ${DATA_STATUS}"
+        exit "${DATA_RC}"
+    fi
 fi
 
 # Isolate any existing or new pilot shards from final MSBA aggregation (`results/REPORT.md`).

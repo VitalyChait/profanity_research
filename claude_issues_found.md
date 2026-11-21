@@ -10,24 +10,26 @@
 
 Candidates that did not hold up are listed in [§4](#4-investigated-and-rejected-not-real-issues).
 
+**Fix status (updated 2026-11-20):** each issue below has a **Status** line. "Fixed" means the change is in the named commit, with a regression test.
+
 **Test-suite status:** `pytest -m "not gpu"` gives **119 passed**. None of the issues below is caught. In two cases (H5/H7 and H6) the unit tests build their inputs in a different format from the one production writes, so they pass while the real pipeline fails.
 
 ---
 
 ## Summary
 
-| # | Severity | Area | Issue | Validation |
-|---|---|---|---|---|
-| C1 | **Critical** | Data labels | BeaverTails response-level `is_safe` is used as the *prompt* label; 44.5% of loaded harmful prompts become "benign" | Reproduced on the real rows |
-| C2 | **Critical** | Data splits | Obfuscated variants are split independently of their parent, so calib prompts reappear (obfuscated) in test; the leakage check reports 0 | Reproduced |
-| H1 | High | Data labels | Obfuscated copies of *safe* prompts are force-labeled `label_unsafe=True` (~25% of the dataset) | Reproduced |
-| H2 | High | Analysis | The obfuscated subset is selected by `category == "obfuscated"`, which never matches, so every obfuscation metric is NaN and **H6 is always NOT_EVALUATED** | Reproduced |
-| H3 | High | Analysis | Tomography writes `summary.json` as a dict but the hypothesis reader requires a list, so **H5 and H7 are always NOT_EVALUATED** | Reproduced |
-| H4 | High | Human eval | The "blinded" annotation sheet shows raters the LLM-judge scores, rationale, `success`, `experiment`, `raw_text` and token columns | Reproduced on the smoke output |
-| H5 | High | M1 guard | The fine-tuned encoder guard is trained in pure bf16 with AdamW at lr=3e-5, so ~83% of weight updates round to zero | Reproduced numerically |
-| H6 | High | Cost accounting | The cost of the steering dev sweep is discarded, so StTP setup cost is under-reported (biases H1 and Figs 3–4) | Confirmed by code trace |
-| H7 | High | Security | `HF_TOKEN` is put into the argv of the long-running remote process (visible to all users on the shared host) and printed by `remote.sh status` | Reproduced |
-| H8 | High | Ops | `download_models.py` downloads into `$HF_HOME/` instead of `$HF_HOME/hub/`; the pre-download is never used and disk usage doubles | Reproduced |
+| # | Severity | Area | Issue | Validation | Status |
+|---|---|---|---|---|---|
+| C1 | **Critical** | Data labels | BeaverTails response-level `is_safe` is used as the *prompt* label; 44.5% of loaded harmful prompts become "benign" | Reproduced on the real rows | **Fixed** (`abc1a28`) |
+| C2 | **Critical** | Data splits | Obfuscated variants are split independently of their parent, so calib prompts reappear (obfuscated) in test; the leakage check reports 0 | Reproduced | **Fixed** (`abc1a28`) |
+| H1 | High | Data labels | Obfuscated copies of *safe* prompts are force-labeled `label_unsafe=True` (~25% of the dataset) | Reproduced | Partly fixed (`abc1a28`) |
+| H2 | High | Analysis | The obfuscated subset is selected by `category == "obfuscated"`, which never matches, so every obfuscation metric is NaN and **H6 is always NOT_EVALUATED** | Reproduced | **Fixed** (`abc1a28`) |
+| H3 | High | Analysis | Tomography writes `summary.json` as a dict but the hypothesis reader requires a list, so **H5 and H7 are always NOT_EVALUATED** | Reproduced | **Fixed** (`abc1a28`) |
+| H4 | High | Human eval | The "blinded" annotation sheet shows raters the LLM-judge scores, rationale, `success`, `experiment`, `raw_text` and token columns | Reproduced on the smoke output | Open |
+| H5 | High | M1 guard | The fine-tuned encoder guard is trained in pure bf16 with AdamW at lr=3e-5, so ~83% of weight updates round to zero | Reproduced numerically | **Fixed** (uncommitted) |
+| H6 | High | Cost accounting | The cost of the steering dev sweep is discarded, so StTP setup cost is under-reported (biases H1 and Figs 3–4) | Confirmed by code trace | **Fixed** (`c2b6fd1`) |
+| H7 | High | Security | `HF_TOKEN` is put into the argv of the long-running remote process (visible to all users on the shared host) and printed by `remote.sh status` | Reproduced | Open |
+| H8 | High | Ops | `download_models.py` downloads into `$HF_HOME/` instead of `$HF_HOME/hub/`; the pre-download is never used and disk usage doubles | Reproduced | **Fixed** (uncommitted) |
 
 Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-bar) and rejected candidates in [§4](#4-investigated-and-rejected-not-real-issues).
 
@@ -37,6 +39,7 @@ Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-ba
 
 ### C1. BeaverTails QA-pair safety label is used as the prompt-level label
 
+- **Status: Fixed in `abc1a28`.** A prompt is labeled unsafe when at least one of its responses is unsafe. Prompts whose responses are all safe carry no prompt-level evidence, so they are skipped rather than labeled benign. One `Example` is kept per unique prompt, and `response_unsafe` still comes from `is_safe`. Test: `test_beavertails_prompt_label_is_not_the_response_label`.
 - **Where:** `src/minorsafe/data/sources.py:195-220` (`load_beavertails`), specifically `:213` `label_unsafe=not is_safe` and `:216` `categories=["benign"] if is_safe else ["unsafe_other"]`.
 - **Problem:** In BeaverTails, `is_safe` describes the **prompt+response pair** (whether the sampled response was harmless). It says nothing about whether the prompt is safe. Almost every BeaverTails prompt comes from red-teaming, so a harmful prompt that happened to get a refusal is `is_safe=True`. The loader turns that into `label_unsafe=False` with category `benign`. The same line also sets `response_unsafe`, which is the correct use of this field.
 - **Validation (reproduced):** I fetched the exact 600 rows the loader streams (`30k_test`, first 600):
@@ -53,6 +56,7 @@ Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-ba
 
 ### C2. Obfuscated variants leak across splits (calib → test); the leakage check cannot see it
 
+- **Status: Fixed in `abc1a28`.** `assign_splits` now splits by prompt family. Variants follow `meta.parent_id` to their parent, `[item N]` / `[case N]` / `(#N)` copy suffixes are stripped before grouping, and the family key is the prompt alone. `check_split_leakage` counts family leaks as well as exact-text leaks, and the data card says so. Tests: `test_obfuscated_variants_inherit_parent_split`, `test_suffix_padded_copies_share_a_split` and `test_offline_build_keeps_variants_with_parents_and_primary_obfuscated` (`tests/unit/test_data.py`).
 - **Where:** `src/minorsafe/data/build.py:97` builds obfuscated variants **before** splitting, then `build.py:136` assigns splits to parents and variants independently. `src/minorsafe/data/splits.py:15` hashes each item's *own* normalized text. `src/minorsafe/data/obfuscation.py:162` copies `split=ex.split`, which is still `None` at that point. `meta["parent_id"]` is recorded but never used.
 - **Problem:** A prompt can go to `calib` while its leetspeak, homoglyph or spaced copies go to `test`. `check_split_leakage` (`splits.py:57`) only compares exact normalized strings, so it reports 0. The data card then states "Cross-Split Normalized Leakage: 0".
 - **Validation (reproduced):**
@@ -68,6 +72,7 @@ Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-ba
 
 ### H1. Obfuscated copies of safe prompts are force-labeled unsafe
 
+- **Status: Partly fixed in `abc1a28`.** Variants now carry `obfuscated` and `profanity` as their primary categories, and the parent's `benign` / `benign_tricky` tags are dropped. Unsafe-labeled rows therefore no longer fall into the `benign` bucket. **Still open:** `label_unsafe=True` is still hard-coded, which contradicts the seed-corpus convention that a profane but harmless request is safe. Variants also still copy the safe parent's helpful `reference_safe`, and the judge is still told the prompt is unsafe. The label-semantics decision below has not been made.
 - **Where:** `src/minorsafe/data/obfuscation.py:154` appends `" What the fuck is this bullshit?"` to any parent without profanity, `:164` hard-codes `label_unsafe=True`, `:158` keeps the parent's categories *first*, and `reference_safe` is copied from the parent.
 - **Problem:** A benign question plus an appended curse becomes an "unsafe request" but keeps a **helpful** reference answer and the primary category `benign`. This contradicts the repo's own convention: the seed example "This fucking math homework is total bullshit, explain quadratic equations…" is labeled `False` (`sources.py:49-53`).
 - **Validation (reproduced):**
@@ -79,6 +84,7 @@ Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-ba
 
 ### H2. The obfuscation subset is never selected, so H6 can never be evaluated
 
+- **Status: Fixed in `abc1a28`.** `obfuscated` is now `categories[0]` for every obfuscated variant (`_obfuscated_categories`), so `category == "obfuscated"` selects them in aggregation. Tests: `test_obfuscated_variants_are_primary_obfuscated_and_not_benign` and the offline-build test, both on real generator output.
 - **Where:** `src/minorsafe/runner/run.py:49` stores only `category = ex.categories[0]`. `src/minorsafe/analysis/aggregate.py:215` filters `df["category"] == "obfuscated"`. H6 is at `src/minorsafe/analysis/hypotheses.py:362`.
 - **Problem:** No example in the pipeline has `obfuscated` as its *first* category:
   - Obfuscated variants put the parent's categories first (`obfuscation.py:158`).
@@ -92,6 +98,7 @@ Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-ba
 
 ### H3. Tomography `summary.json` format does not match its reader, so H5 and H7 can never be evaluated
 
+- **Status: Fixed in `abc1a28`.** `load_tomography_summary` accepts the writer's `{"profile", "models"}` dict as well as a bare list. When `summary.json` is missing, it rebuilds the entries from the per-model reports, so a run that died before the final write still feeds H5/H7. Test: `test_real_tomography_writer_output_feeds_h5_and_h7`. Not changed: the writer still writes `summary.json` only at the end, and `run_msba.sh` still re-runs tomography when the file is missing.
 - **Where:** The writer at `src/minorsafe/methods/steering/tomography.py:234` writes `{"profile": ..., "models": [...]}`. The reader at `src/minorsafe/analysis/hypotheses.py:617` does `if isinstance(loaded, list):`, otherwise it ignores the file.
 - **Validation (reproduced):** With identical model entries, the production dict format gives **H5 = NOT_EVALUATED, H7 = NOT_EVALUATED**, while the list format used by `tests/unit/test_path_a.py` gives SUPPORTED/SUPPORTED.
 - **Impact:** This holds even with a complete `summary.json` on the server (`docs/RESEARCH_TODO.md` says the server has all 13 reports plus `summary.json`). Every `analyze` run will report H5 and H7 as NOT_EVALUATED.
@@ -100,6 +107,7 @@ Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-ba
 
 ### H4. The human-annotation sheet is not blinded: raters see the judge's scores
 
+- **Status: Open.**
 - **Where:** `src/minorsafe/eval/judge.py:299` (`_BLIND_DROP_COLS`) and `:367`. `compute_human_agreement` (`:382`) then reads `judge_*` from the labeled CSV.
 - **Problem:** Only `run_id`, method fields, `action_taken`, `blocked`, `guard_score` and `x_*` are dropped.
 - **Validation (reproduced):** The real exported sheet `results/smoke_workspace/results/human_eval_150.csv` contains, among 68 columns:
@@ -112,6 +120,13 @@ Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-ba
 
 ### H5. The fine-tuned encoder guard is trained in pure bf16, so most weight updates vanish
 
+- **Status: Fixed (uncommitted).**
+  - **Training:** `train_encoder_guard` loads the classifier in fp32 whatever the arm's `quant`, and runs only the forward pass under `torch.autocast` in the quant's dtype. With fp16 it adds a `GradScaler`.
+  - **Calibration and saving:** after training, the weights are cast to the dtype the guard is served in (`cast_for_deployment`). The dev threshold is calibrated on those weights, and the checkpoint is saved in that dtype.
+  - **Cache key:** it now includes the training precision (`TRAIN_PRECISION`), so checkpoints trained in pure bf16 are never reused.
+  - **Measured:** on CPU, with the GPU's bf16 setup simulated and 18 steps at lr 3e-5, the old trainer changed 15.6% of the weights and 0% of the LayerNorm weights. The new one changed 99.9% and 100%.
+  - **Test:** `tests/unit/test_encoder_training_precision.py`.
+  - **Memory:** fp32 AdamW needs about 16 bytes per parameter. The auto-selected fine-tuned guard is `modernbert_base` on every profile (about 2.4 GB). Explicitly fine-tuning `eurobert_2b` (about 34 GB) or `xlmr_xxl` needs a correspondingly large GPU.
 - **Where:** `src/minorsafe/methods/guards/train_encoder.py:122` calls `load_encoder_classifier(..., quant=quant)`, which loads all weights as `torch.bfloat16` on CUDA (`registry.py:140`). Training then uses `torch.optim.AdamW(trainable, lr=3e-5)` (`:153`) with no fp32 master weights, autocast or stochastic rounding.
 - **Validation (reproduced numerically):**
   - One Adam-sized step (3e-5) changes only **15.6%** of bf16 weights with typical magnitude 0.04, and 31% of a freshly initialized head (std 0.02).
@@ -122,6 +137,7 @@ Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-ba
 
 ### H6. Steering dev-sweep cost is dropped from StTP/StMP/SwFC/Ortho setup cost
 
+- **Status: Fixed in `c2b6fd1`.** `SteeringResponseMethod.setup` merges the sweep's stages into the setup report (`_with_sweep_cost`). A cached sweep still reports its original cost, with its stages tagged `sweep_cached`. Test: `tests/unit/test_setup_accounting.py`.
 - **Where:** `src/minorsafe/methods/steering/method.py:63`: `swept_best, _ = sweep_steering_hyperparams(...)`. The second return value is the sweep's `SetupReport` (`sweep.py:185`). Only the chosen params are recorded (`method.py:164`).
 - **Problem:** The sweep runs 6 depths × 3–4 strengths, each a greedy generation over 16 dev prompts × 128 tokens, plus a baseline pass and activation capture. That is typically several times the cost of vector extraction, yet `setup_wall_s`, `setup_gpu_s` and `setup_tokens` for every steering arm report extraction only.
 - **Validation (confirmed by code trace):** No other code path merges the sweep report. `aggregate.py` reads `setup.json`, which is `setup_rec.to_dict()` from the extraction report.
@@ -130,6 +146,7 @@ Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-ba
 
 ### H7. `HF_TOKEN` is exposed in process arguments on the shared server and printed by `remote.sh status`
 
+- **Status: Open.** The token is still inlined by `remote_env_prefix`, and `status` still runs `pgrep -af`.
 - **Where:** `scripts/remote.sh:236` (`remote_env_prefix` inlines `HF_TOKEN=<value>` into the command string). The token reaches `tmux new-session … bash -lc "<cmd>"` at `:455` (`run --detach`) and `:619` (autopilot). `remote.sh status` at `:507` runs `pgrep -af '[r]un_autopilot\.sh|…'`.
 - **Problem:** The detached `bash -lc "export … HF_TOKEN=hf_…; cd … && bash scripts/run_autopilot.sh …"` process lives for the whole multi-day run, with the token in its argv. Any user on the host can read it with `ps aux`, and `gpu_lab1` is explicitly `shared_host: true`. `remote.sh status` also prints that full command line to your terminal and any logs.
 - **Validation (reproduced with a fake token):** Launching the same `bash -lc "export … HF_TOKEN=hf_<fake>…; … run_autopilot.sh …"` shape, both `ps -eo user,args` and the exact `pgrep -af '[r]un_autopilot\.sh'` pattern from `status` printed `HF_TOKEN=hf_<fake-demo-token>`. `DRY_RUN` masks it, which is why it isn't visible during testing.
@@ -137,6 +154,13 @@ Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-ba
 
 ### H8. `download_models.py` pre-downloads into the wrong cache directory
 
+- **Status: Fixed (uncommitted).**
+  - **Cache folder:** `--cache-dir` now defaults to `None`, which is the runtime hub cache (`$HF_HUB_CACHE`, i.e. `$HF_HOME/hub`). An explicit `--cache-dir` that differs from it triggers a warning.
+  - **Files downloaded:** each repo's file list is read first, then only configs, tokenizers, chat templates and custom code (`*.py`, which EuroBERT needs) are fetched, plus one copy of the weights: root safetensors, or `pytorch_model*.bin` when a repo has no safetensors. Skipped: `original/` (Llama's ~16 GB `consolidated.*.pth`), Mistral-native `consolidated.*`, `.bin`/Flax duplicates, and ONNX exports.
+  - **`--verify`:** checks that the weight files exist in the downloaded snapshot, then loads config and tokenizer with `local_files_only=True` from the runtime cache.
+  - **Leftover copies:** the script warns about, and sizes, `models--*` folders left directly in `$HF_HOME` by the old version. It does not delete them.
+  - **Checked:** the selection was checked against the live file lists of 11 profile repos.
+  - **Test:** `tests/unit/test_download_models.py`.
 - **Where:** `scripts/download_models.py:52` defaults `--cache-dir` to `$HF_HOME`, and `:101` calls `snapshot_download(repo_id=…, cache_dir=args.cache_dir)`.
 - **Problem:** `cache_dir` means the *hub* cache. With `cache_dir=$HF_HOME`, files go to `$HF_HOME/models--…`, while `from_pretrained` and vLLM read `$HF_HUB_CACHE = $HF_HOME/hub/models--…`.
 - **Validation (reproduced):**
@@ -152,19 +176,34 @@ Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-ba
 
 These are real and worth fixing, but each has limited scope, is partly mitigated, or affects an optional path.
 
-| # | Issue | Where | Validation |
-|---|---|---|---|
-| M1 | **Stale processed data is silently reused.** The server data build (`results/logs/data_20261120_002253.log`) loads no `neologism_corpus` source; that loader was committed later in `25d8fb1`. The data card has **0 neologism examples and only 36 `slang` examples** (H5's `slang_fpr` subset). Current code loads all 240 neologism examples, and they pass the English filter. `run_autopilot.sh:178` skips the rebuild if the parquet exists, and nothing records a data/code fingerprint. | `run_autopilot.sh`, `runner/run.py:123`, `results/data_card.md` | Reproduced (logs, git history, local loader) |
-| M2 | **A partial judge JSON defaults to passing scores.** If `age_appropriate` is present, missing or invalid `helpful`, `meaning_preserved` and `fluent` default to 4, `parse_ok=True`, and the row counts as success. | `eval/judge.py:38-48` | Reproduced: `{"age_appropriate":5}` gives success=True |
-| M3 | **Empty responses score as perfect.** They get `ppl=0.0`, `ppl_delta_pct=0.0` and `fk_compliant=True`, which biases H2 (SwFC vs StTP PPL) and makes the sweep's ΔPPL ≤ 10% feasibility check pass for collapsed outputs. | `eval/fluency.py:80,97,129,142`, `eval/readability.py:18` | Reproduced |
-| M4 | **Truncated reasoning is scored as the answer.** When an R1-distill chat template pre-injects `<think>` and the 1,024-token budget runs out before `</think>`, `split_reasoning` returns the whole chain of thought as the visible answer with `n_reasoning=0`. The judge and toxicity metrics then score the reasoning. | `generation.py:34-41` | Plausible (behaviour reproduced; depends on the template version) |
-| M5 | **The `multiturn` experiment never uses multi-turn data.** `build_multiturn_drift_dialogues` is never called, so `multiturn.yaml` runs ordinary single-turn dev examples under a multi-turn label. This is an optional study. | `data/multiturn.py:42`, `configs/experiments/multiturn.yaml` | Confirmed (no call site) |
-| M6 | **`free_model()` frees nothing.** It `del`s its own local names only, so callers keep the model alive. In the tomography loop the next model loads while the previous one is still resident. On `gpu_24gb`, `gemma3_4b` (~8.6 GB) plus `gemma2_9b` (~18.5 GB) exceeds 24 GB. The bf16-vector transfer path in steering also holds two copies. | `registry.py:211`, `steering/tomography.py:203,232`, `steering/method.py:122` | Reproduced (weakref still alive after `free_model`) |
-| M7 | **Artifact caches ignore the data.** Encoder-guard, LoRA, sweep and steering-vector caches are keyed on model/N/epochs only, not on a dataset hash, so a data rebuild reuses artifacts trained on old (possibly now-test) items. `remote.sh reset` mitigates this by deleting `results/runs`. | `train_encoder.py:89`, `lora/train.py:126`, `sweep.py:82` | Confirmed by code trace |
-| M8 | **Decoder guards use their stock hazard taxonomy.** Llama-Guard-3 and Qwen3Guard are prompted with their built-in categories, which contain no profanity class. The minor-specific `_MINOR_POLICY_PROMPT` is used only for `generic` guards. This systematically lowers decoder-guard recall on the study's core construct (H3, H6). It may be intentional ("as shipped"), but if so it should be stated. | `guards/decoder_guard.py:62` | Confirmed by code trace |
-| M9 | **The SLURM array conflicts with locking.** The array starts 6 phases at once, but each run requires server exclusivity and the repo-wide `.minorsafe.lock`, so tasks on the same node abort. `acquire_run_lock` also uses non-atomic read-then-write instead of `O_EXCL`. | `scripts/slurm/run_grid.sbatch:11`, `hardware.py:487-500` | Confirmed by code trace |
-| M10 | **Failed energy sampling is reported as 0 J.** If an NVML query fails (GB10 shows `memory.used [N/A]` in `results/logs/*.gpu.csv`), the sampler thread breaks on its first iteration and per-item energy becomes a finite **0.0 J** instead of NaN. | `telemetry/gpu.py:49`, `runner/run.py:192` | Plausible (GB10 evidence) |
-| M11 | **The lab1 environment is not locked.** On drivers with CUDA < 13 (lab1), `setup_server.sh` installs with `uv pip install … vllm==0.19.0 torch==2.10.0`, bypassing `uv.lock`. Reported results then come from an unpinned environment, mitigated only by the per-run `packages` manifest. | `scripts/setup_server.sh:40` | Confirmed by code trace |
+| # | Issue | Where | Validation | Status |
+|---|---|---|---|---|
+| M1 | **Stale processed data is silently reused.** The server data build (`results/logs/data_20261120_002253.log`) loads no `neologism_corpus` source; that loader was committed later in `25d8fb1`. The data card has **0 neologism examples and only 36 `slang` examples** (H5's `slang_fpr` subset). Current code loads all 240 neologism examples, and they pass the English filter. `run_autopilot.sh:178` skips the rebuild if the parquet exists, and nothing records a data/code fingerprint. | `run_autopilot.sh`, `runner/run.py:123`, `results/data_card.md` | Reproduced (logs, git history, local loader) | **Fixed** (uncommitted; see below) |
+| M2 | **A partial judge JSON defaults to passing scores.** If `age_appropriate` is present, missing or invalid `helpful`, `meaning_preserved` and `fluent` default to 4, `parse_ok=True`, and the row counts as success. | `eval/judge.py:38-48` | Reproduced: `{"age_appropriate":5}` gives success=True | Open |
+| M3 | **Empty responses score as perfect.** They get `ppl=0.0`, `ppl_delta_pct=0.0` and `fk_compliant=True`, which biases H2 (SwFC vs StTP PPL) and makes the sweep's ΔPPL ≤ 10% feasibility check pass for collapsed outputs. | `eval/fluency.py:80,97,129,142`, `eval/readability.py:18` | Reproduced | Open |
+| M4 | **Truncated reasoning is scored as the answer.** When an R1-distill chat template pre-injects `<think>` and the 1,024-token budget runs out before `</think>`, `split_reasoning` returns the whole chain of thought as the visible answer with `n_reasoning=0`. The judge and toxicity metrics then score the reasoning. | `generation.py:34-41` | Plausible (behaviour reproduced; depends on the template version) | **Fixed** (`c2b6fd1`) |
+| M5 | **The `multiturn` experiment never uses multi-turn data.** `build_multiturn_drift_dialogues` is never called, so `multiturn.yaml` runs ordinary single-turn dev examples under a multi-turn label. This is an optional study. | `data/multiturn.py:42`, `configs/experiments/multiturn.yaml` | Confirmed (no call site) | Open |
+| M6 | **`free_model()` frees nothing.** It `del`s its own local names only, so callers keep the model alive. In the tomography loop the next model loads while the previous one is still resident. On `gpu_24gb`, `gemma3_4b` (~8.6 GB) plus `gemma2_9b` (~18.5 GB) exceeds 24 GB. The bf16-vector transfer path in steering also holds two copies. | `registry.py:211`, `steering/tomography.py:203,232`, `steering/method.py:122` | Reproduced (weakref still alive after `free_model`) | Partly fixed (`c2b6fd1`) |
+| M7 | **Artifact caches ignore the data.** Encoder-guard, LoRA, sweep and steering-vector caches are keyed on model/N/epochs only, not on a dataset hash, so a data rebuild reuses artifacts trained on old (possibly now-test) items. `remote.sh reset` mitigates this by deleting `results/runs`. | `train_encoder.py:89`, `lora/train.py:126`, `sweep.py:82` | Confirmed by code trace | Partly fixed (`c2b6fd1`) |
+| M8 | **Decoder guards use their stock hazard taxonomy.** Llama-Guard-3 and Qwen3Guard are prompted with their built-in categories, which contain no profanity class. The minor-specific `_MINOR_POLICY_PROMPT` is used only for `generic` guards. This systematically lowers decoder-guard recall on the study's core construct (H3, H6). It may be intentional ("as shipped"), but if so it should be stated. | `guards/decoder_guard.py:62` | Confirmed by code trace | Open |
+| M9 | **The SLURM array conflicts with locking.** The array starts 6 phases at once, but each run requires server exclusivity and the repo-wide `.minorsafe.lock`, so tasks on the same node abort. `acquire_run_lock` also uses non-atomic read-then-write instead of `O_EXCL`. | `scripts/slurm/run_grid.sbatch:11`, `hardware.py:487-500` | Confirmed by code trace | Open |
+| M10 | **Failed energy sampling is reported as 0 J.** If an NVML query fails (GB10 shows `memory.used [N/A]` in `results/logs/*.gpu.csv`), the sampler thread breaks on its first iteration and per-item energy becomes a finite **0.0 J** instead of NaN. | `telemetry/gpu.py:49`, `runner/run.py:192` | Plausible (GB10 evidence) | Open |
+| M11 | **The lab1 environment is not locked.** On drivers with CUDA < 13 (lab1), `setup_server.sh` installs with `uv pip install … vllm==0.19.0 torch==2.10.0`, bypassing `uv.lock`. Reported results then come from an unpinned environment, mitigated only by the per-run `packages` manifest. | `scripts/setup_server.sh:40` | Confirmed by code trace | Open |
+
+**Status notes for the partly fixed and fixed Medium items:**
+
+- **M1 — fixed (uncommitted).**
+  - **Build record:** `build_dataset` now writes `data/processed/build_meta.json`. It records a fingerprint of the data spec, the data-building code, the synth prompt templates, the teacher and the pair filter, plus a digest of the parquet files. The code is every `minorsafe.data` module reachable from `build`, plus the pair filter's refusal and toxicity code and teacher decoding, hashed with comments and docstrings ignored.
+  - **`minorsafe data status`:** compares that record with what the current checkout would build. It exits with code 3 when the data is missing, stale, or has no record, as with data built before this change.
+  - **Autopilot:** `run_autopilot.sh` uses that check instead of testing whether the file exists. If results built from the old data exist (`results/runs`, `results/tomography`), it stops. `--rebuild-data` moves those results to `results/stale_archive/` and rebuilds; `--keep-data` keeps the old dataset. Both flags pass through `remote.sh autopilot`, and `restart_remote.sh --keep-data` passes `--keep-data`.
+  - **GPU runs and tomography:** no longer silently build the offline seed-corpus dataset. They refuse data that is stale, offline-built or has no record, unless `MINORSAFE_ACCEPT_STALE_DATA=1`.
+  - **Run shards:** every run manifest records the data digest, and resuming a shard that holds responses from a different dataset is refused.
+  - **`minorsafe status`:** prints the dataset's freshness.
+  - **Tests:** `tests/unit/test_data_provenance.py`. They include a sandboxed run of the real autopilot script; its three autopilot tests fail on the previous script.
+  - **Not covered:** Hugging Face source rows are streamed without a pinned revision, so upstream dataset changes are not detected.
+- **M4 — fixed in `c2b6fd1`.** When the chat template already opened `<think>`, a completion that never closes it is counted entirely as reasoning, with an empty visible answer and `truncated=True`. Note that M3 (empty responses score as perfect) now applies to these cut-off answers.
+- **M6 — partly fixed in `c2b6fd1`.** The steering bf16 vector-transfer path releases the quantized generator before loading the bf16 copy, and reloads it afterwards. `free_model()` itself and the tomography loop are unchanged.
+- **M7 — partly fixed in `c2b6fd1`.** The sweep, steering-vector, LoRA and encoder cache keys now include every method setting that changes the artifact: quant, concepts, pooling, learning rate, seed and so on. They still contain no dataset hash. Since the M1 fix, the autopilot moves `results/runs` (including `_artifacts`) aside before it rebuilds data. A manual `data build` followed by a run still reuses cached artifacts, although run shards themselves are protected.
 
 **Lower-severity notes** (real but minor):
 - The refusal regex is narrow; for example, "I can't assist with that" is not matched. The judge OR-combines its own refusal flag, which limits the impact.

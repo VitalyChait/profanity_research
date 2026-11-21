@@ -24,7 +24,7 @@ from minorsafe.config import (
     load_models,
     load_prompts,
 )
-from minorsafe.data.build import build_dataset
+from minorsafe.data.build import build_dataset, ensure_dataset, stale_data_accepted
 from minorsafe.data.schema import Example, load_examples, load_pairs
 from minorsafe.data.splits import stratified_subsample as _stratified_subsample
 from minorsafe.eval.capability import evaluate_capability_retention
@@ -36,7 +36,17 @@ from minorsafe.runner.grid import RunSpec, expand_experiment_grid, verify_split_
 from minorsafe.runner.store import RunStore
 from minorsafe.telemetry import GPUSampler, SmartRunLogger
 from minorsafe.telemetry.cost import gpu_allocation
-from minorsafe.utils import DATA_DIR, RESULTS_DIR, git_sha, package_versions, read_json, write_json
+from minorsafe.utils import (
+    DATA_DIR,
+    RESULTS_DIR,
+    get_logger,
+    git_sha,
+    package_versions,
+    read_json,
+    write_json,
+)
+
+log = get_logger(__name__)
 
 
 def _output_to_row(
@@ -88,6 +98,33 @@ def _output_to_row(
     return row
 
 
+def check_shard_dataset(run_dir: Path, n_done: int, data_digest: str | None, *, strict: bool) -> None:
+    """Refuse to resume a run shard whose stored responses came from a different dataset.
+
+    Resuming would append rows generated from the current ``data/processed`` to rows generated from
+    an earlier build, so one shard would silently mix two datasets. The check is skipped when the shard
+    holds no responses yet.
+    """
+    manifest_path = run_dir / "manifest.json"
+    if n_done == 0 or not manifest_path.exists():
+        return
+    try:
+        recorded = read_json(manifest_path).get("data_digest")
+    except (OSError, ValueError, AttributeError):
+        recorded = None
+    if recorded == data_digest:
+        return
+    origin = "a dataset with no recorded digest" if recorded is None else f"dataset {recorded}"
+    msg = (
+        f"Run shard {run_dir} holds {n_done} responses generated from {origin}, but data/processed is now "
+        f"dataset {data_digest}. Resuming would mix two datasets in one shard; move the shard (or "
+        "results/runs) aside and re-run it."
+    )
+    if strict and not stale_data_accepted():
+        raise RuntimeError(msg)
+    log.warning(msg)
+
+
 def run_experiment(
     experiment_name: str,
     profile_name: str = "cpu_debug",
@@ -121,8 +158,12 @@ def run_experiment(
 
     base_data_dir = Path(data_dir) if data_dir else DATA_DIR
     proc_dir = base_data_dir / "processed"
-    if not (proc_dir / "examples.parquet").exists():
-        build_dataset(load_data_spec(), data_dir=base_data_dir, results_dir=RESULTS_DIR, offline=True)
+    # Production runs (GPU, canonical results dir) refuse missing/stale/offline-built data instead of
+    # silently building or reusing it.
+    strict_data = profile.device == "cuda" and runs_root is None
+    data_status = ensure_dataset(base_data_dir, strict=strict_data, results_dir=RESULTS_DIR)
+    data_digest = data_status.data_digest
+    data_fingerprint = (data_status.meta or {}).get("fingerprint")
 
     all_examples = load_examples(proc_dir / "examples.parquet")
     all_pairs = load_pairs(proc_dir / "pairs.parquet")
@@ -172,6 +213,8 @@ def run_experiment(
                 "git_sha": sha,
                 "packages": pkgs,
                 "hardware_profile": profile.name,
+                "data_digest": data_digest,
+                "data_fingerprint": data_fingerprint,
                 "run_spec": asdict(rspec),
                 "status": status,
                 "updated_at": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
@@ -225,6 +268,7 @@ def run_experiment(
                 need_cap = bool(exp.capability_eval and not (run_dir / "capability.json").exists())
 
                 if pending or need_cap:
+                    check_shard_dataset(run_dir, len(done), data_digest, strict=strict_data)
                     _write_manifest(run_dir, rspec, "running")
                     ctx = RunContext(
                         hardware=profile,
