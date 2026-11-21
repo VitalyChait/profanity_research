@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -155,7 +156,7 @@ def test_parse_judge_json_valid_fenced_and_malformed():
 
     fallback, ok_bad = parse_judge_json("not json at all")
     assert ok_bad is False
-    assert fallback["age_appropriate"] == 3
+    assert math.isnan(fallback["age_appropriate"])  # no placeholder scores (M2)
 
 
 def test_filter_contrastive_pairs_enforces_length_and_jaccard():

@@ -12,7 +12,9 @@ import pandas as pd
 from minorsafe.analysis.stats import clustered_bootstrap_ci
 from minorsafe.data.lexicons import find_profanity_spans
 from minorsafe.eval.detection import compute_detection_metrics
-from minorsafe.utils import read_json
+from minorsafe.utils import is_empty_response, read_json
+
+_NAN = float("nan")
 
 
 def _col_mean(df: pd.DataFrame, col: str, default: float = 0.0) -> float:
@@ -38,11 +40,32 @@ def _stat(
 ) -> tuple[float, float, float]:
     if col not in df.columns:
         return default, default, default
-    vals = df[col].dropna().astype(float).to_numpy()
+    series = pd.to_numeric(df[col], errors="coerce").astype(float)
+    keep = series.notna().to_numpy()
+    vals = series.to_numpy()[keep]
     if vals.size == 0:
         return default, default, default
-    cl = clusters if (clusters and len(clusters) == vals.size) else None
+    # Drop the clusters of NaN rows too, so the bootstrap stays clustered by example.
+    cl = (
+        [c for c, k in zip(clusters, keep, strict=True) if k]
+        if clusters and len(clusters) == keep.size
+        else None
+    )
     return clustered_bootstrap_ci(vals, clusters=cl, n_boot=300)
+
+
+def _empty_response_rate(df: pd.DataFrame) -> float:
+    if "is_empty" in df.columns:
+        return float(df["is_empty"].astype(bool).mean())
+    if "text" in df.columns:  # shards evaluated before the is_empty column existed
+        return float(df["text"].map(lambda t: is_empty_response(t if isinstance(t, str) else None)).mean())
+    return _NAN
+
+
+def _judge_parse_fail_rate(df: pd.DataFrame) -> float:
+    if "judge_parse_ok" not in df.columns:
+        return _NAN
+    return float((~df["judge_parse_ok"].astype(bool)).mean())
 
 
 def _detection_summary(df: pd.DataFrame, obf_df: pd.DataFrame) -> dict[str, float]:
@@ -203,13 +226,14 @@ def aggregate_experiment_results(runs_dir: Path, out_dir: Path) -> pd.DataFrame:
         tox_mean, _, _ = _stat(df, "toxic_flag", clusters)
         prof_mean, _, _ = _stat(df, "has_profanity", clusters)
         over_ref_mean, _, _ = _stat(df, "over_refusal", clusters)
-        fk_mean, _, _ = _stat(df, "fk_grade", clusters)
-        fk_comp_mean, _, _ = _stat(df, "fk_compliant", clusters)
+        # Metrics that are undefined for empty / unjudged responses: NaN when no row has a value, never 0.
+        fk_mean, _, _ = _stat(df, "fk_grade", clusters, default=_NAN)
+        fk_comp_mean, _, _ = _stat(df, "fk_compliant", clusters, default=_NAN)
         bert_mean, _, _ = _stat(df, "bertscore_f1_ref", clusters)
         sari_mean, _, _ = _stat(df, "sari_score", clusters)
-        ppl_delta_mean, _, _ = _stat(df, "ppl_delta_pct", clusters)
+        ppl_delta_mean, _, _ = _stat(df, "ppl_delta_pct", clusters, default=_NAN)
         rep_mean, _, _ = _stat(df, "repetition_rate", clusters)
-        judge_age_mean, _, _ = _stat(df, "judge_age_appropriate", clusters)
+        judge_age_mean, _, _ = _stat(df, "judge_age_appropriate", clusters, default=_NAN)
 
         # Subcategory breakdowns (NaN when the subset is absent; never fall back to the overall value)
         obf_df = df[df["category"] == "obfuscated"] if "category" in df.columns else pd.DataFrame()
@@ -318,6 +342,8 @@ def aggregate_experiment_results(runs_dir: Path, out_dir: Path) -> pd.DataFrame:
                 "toxic_rate": tox_mean,
                 "profanity_rate": prof_mean,
                 "over_refusal_rate": over_ref_mean,
+                "empty_response_rate": _empty_response_rate(df),
+                "judge_parse_fail_rate": _judge_parse_fail_rate(df),
                 "slang_fpr": slang_fpr,
                 "obfuscated_success": obf_succ,
                 **det_stats,

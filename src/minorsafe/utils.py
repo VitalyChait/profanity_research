@@ -56,6 +56,16 @@ def normalize_text(text: str) -> str:
     return " ".join("".join(ch.lower() if ch.isalnum() else " " for ch in text).split())
 
 
+def is_empty_response(text: str | None) -> bool:
+    """True when a response has no words: empty, whitespace, or punctuation/emoji only.
+
+    Such a response has no defined perplexity or readability and can never count as a success
+    (claude_issues_found.md M3). Examples: a collapsed steering output, or a reasoning model cut off
+    before ``</think>``.
+    """
+    return not normalize_text(text or "").split()
+
+
 def write_json(path: str | Path, obj: Any) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

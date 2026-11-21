@@ -6,16 +6,18 @@ import textstat
 from wordfreq import zipf_frequency
 
 from minorsafe.data.lexicons import ALPHA_WORD_RE, COMPLEX_TO_SIMPLE
+from minorsafe.utils import is_empty_response
 
 
 def compute_readability_metrics(text: str, target_fk_grade: float = 8.0) -> dict:
+    """Readability of ``text``. A response with no words has no grade (NaN) and is not compliant."""
     clean = (text or "").strip()
-    if not clean:
+    if is_empty_response(clean):
         return {
-            "fk_grade": 0.0,
-            "dale_chall": 0.0,
-            "rare_word_ratio": 0.0,
-            "fk_compliant": True,
+            "fk_grade": float("nan"),
+            "dale_chall": float("nan"),
+            "rare_word_ratio": float("nan"),
+            "fk_compliant": False,
         }
 
     fk = float(textstat.flesch_kincaid_grade(clean))

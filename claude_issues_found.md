@@ -26,10 +26,10 @@ Candidates that did not hold up are listed in [§4](#4-investigated-and-rejected
 | H2 | High | Analysis | The obfuscated subset is selected by `category == "obfuscated"`, which never matches, so every obfuscation metric is NaN and **H6 is always NOT_EVALUATED** | Reproduced | **Fixed** (`abc1a28`) |
 | H3 | High | Analysis | Tomography writes `summary.json` as a dict but the hypothesis reader requires a list, so **H5 and H7 are always NOT_EVALUATED** | Reproduced | **Fixed** (`abc1a28`) |
 | H4 | High | Human eval | The "blinded" annotation sheet shows raters the LLM-judge scores, rationale, `success`, `experiment`, `raw_text` and token columns | Reproduced on the smoke output | Open |
-| H5 | High | M1 guard | The fine-tuned encoder guard is trained in pure bf16 with AdamW at lr=3e-5, so ~83% of weight updates round to zero | Reproduced numerically | **Fixed** (uncommitted) |
+| H5 | High | M1 guard | The fine-tuned encoder guard is trained in pure bf16 with AdamW at lr=3e-5, so ~83% of weight updates round to zero | Reproduced numerically | **Fixed** (`c2410b0` + `ecc51b8`) |
 | H6 | High | Cost accounting | The cost of the steering dev sweep is discarded, so StTP setup cost is under-reported (biases H1 and Figs 3–4) | Confirmed by code trace | **Fixed** (`c2b6fd1`) |
 | H7 | High | Security | `HF_TOKEN` is put into the argv of the long-running remote process (visible to all users on the shared host) and printed by `remote.sh status` | Reproduced | Open |
-| H8 | High | Ops | `download_models.py` downloads into `$HF_HOME/` instead of `$HF_HOME/hub/`; the pre-download is never used and disk usage doubles | Reproduced | **Fixed** (uncommitted) |
+| H8 | High | Ops | `download_models.py` downloads into `$HF_HOME/` instead of `$HF_HOME/hub/`; the pre-download is never used and disk usage doubles | Reproduced | **Fixed** (`c2410b0` + `ecc51b8`) |
 
 Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-bar) and rejected candidates in [§4](#4-investigated-and-rejected-not-real-issues).
 
@@ -120,7 +120,7 @@ Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-ba
 
 ### H5. The fine-tuned encoder guard is trained in pure bf16, so most weight updates vanish
 
-- **Status: Fixed (uncommitted).**
+- **Status: Fixed in `c2410b0` + `ecc51b8`.**
   - **Training:** `train_encoder_guard` loads the classifier in fp32 whatever the arm's `quant`, and runs only the forward pass under `torch.autocast` in the quant's dtype. With fp16 it adds a `GradScaler`.
   - **Calibration and saving:** after training, the weights are cast to the dtype the guard is served in (`cast_for_deployment`). The dev threshold is calibrated on those weights, and the checkpoint is saved in that dtype.
   - **Cache key:** it now includes the training precision (`TRAIN_PRECISION`), so checkpoints trained in pure bf16 are never reused.
@@ -154,7 +154,7 @@ Medium items are in [§3](#3-medium-severity-validated-below-the-highcritical-ba
 
 ### H8. `download_models.py` pre-downloads into the wrong cache directory
 
-- **Status: Fixed (uncommitted).**
+- **Status: Fixed in `c2410b0` + `ecc51b8`.**
   - **Cache folder:** `--cache-dir` now defaults to `None`, which is the runtime hub cache (`$HF_HUB_CACHE`, i.e. `$HF_HOME/hub`). An explicit `--cache-dir` that differs from it triggers a warning.
   - **Files downloaded:** each repo's file list is read first, then only configs, tokenizers, chat templates and custom code (`*.py`, which EuroBERT needs) are fetched, plus one copy of the weights: root safetensors, or `pytorch_model*.bin` when a repo has no safetensors. Skipped: `original/` (Llama's ~16 GB `consolidated.*.pth`), Mistral-native `consolidated.*`, `.bin`/Flax duplicates, and ONNX exports.
   - **`--verify`:** checks that the weight files exist in the downloaded snapshot, then loads config and tokenizer with `local_files_only=True` from the runtime cache.
@@ -178,9 +178,9 @@ These are real and worth fixing, but each has limited scope, is partly mitigated
 
 | # | Issue | Where | Validation | Status |
 |---|---|---|---|---|
-| M1 | **Stale processed data is silently reused.** The server data build (`results/logs/data_20261120_002253.log`) loads no `neologism_corpus` source; that loader was committed later in `25d8fb1`. The data card has **0 neologism examples and only 36 `slang` examples** (H5's `slang_fpr` subset). Current code loads all 240 neologism examples, and they pass the English filter. `run_autopilot.sh:178` skips the rebuild if the parquet exists, and nothing records a data/code fingerprint. | `run_autopilot.sh`, `runner/run.py:123`, `results/data_card.md` | Reproduced (logs, git history, local loader) | **Fixed** (uncommitted; see below) |
-| M2 | **A partial judge JSON defaults to passing scores.** If `age_appropriate` is present, missing or invalid `helpful`, `meaning_preserved` and `fluent` default to 4, `parse_ok=True`, and the row counts as success. | `eval/judge.py:38-48` | Reproduced: `{"age_appropriate":5}` gives success=True | Open |
-| M3 | **Empty responses score as perfect.** They get `ppl=0.0`, `ppl_delta_pct=0.0` and `fk_compliant=True`, which biases H2 (SwFC vs StTP PPL) and makes the sweep's ΔPPL ≤ 10% feasibility check pass for collapsed outputs. | `eval/fluency.py:80,97,129,142`, `eval/readability.py:18` | Reproduced | Open |
+| M1 | **Stale processed data is silently reused.** The server data build (`results/logs/data_20261120_002253.log`) loads no `neologism_corpus` source; that loader was committed later in `25d8fb1`. The data card has **0 neologism examples and only 36 `slang` examples** (H5's `slang_fpr` subset). Current code loads all 240 neologism examples, and they pass the English filter. `run_autopilot.sh:178` skips the rebuild if the parquet exists, and nothing records a data/code fingerprint. | `run_autopilot.sh`, `runner/run.py:123`, `results/data_card.md` | Reproduced (logs, git history, local loader) | **Fixed** (`c2410b0` + `ecc51b8`) |
+| M2 | **A partial judge JSON defaults to passing scores.** If `age_appropriate` is present, missing or invalid `helpful`, `meaning_preserved` and `fluent` default to 4, `parse_ok=True`, and the row counts as success. | `eval/judge.py:38-48` | Reproduced: `{"age_appropriate":5}` gives success=True | **Fixed** (uncommitted; see below) |
+| M3 | **Empty responses score as perfect.** They get `ppl=0.0`, `ppl_delta_pct=0.0` and `fk_compliant=True`, which biases H2 (SwFC vs StTP PPL) and makes the sweep's ΔPPL ≤ 10% feasibility check pass for collapsed outputs. | `eval/fluency.py:80,97,129,142`, `eval/readability.py:18` | Reproduced | **Fixed** (uncommitted; see below) |
 | M4 | **Truncated reasoning is scored as the answer.** When an R1-distill chat template pre-injects `<think>` and the 1,024-token budget runs out before `</think>`, `split_reasoning` returns the whole chain of thought as the visible answer with `n_reasoning=0`. The judge and toxicity metrics then score the reasoning. | `generation.py:34-41` | Plausible (behaviour reproduced; depends on the template version) | **Fixed** (`c2b6fd1`) |
 | M5 | **The `multiturn` experiment never uses multi-turn data.** `build_multiturn_drift_dialogues` is never called, so `multiturn.yaml` runs ordinary single-turn dev examples under a multi-turn label. This is an optional study. | `data/multiturn.py:42`, `configs/experiments/multiturn.yaml` | Confirmed (no call site) | Open |
 | M6 | **`free_model()` frees nothing.** It `del`s its own local names only, so callers keep the model alive. In the tomography loop the next model loads while the previous one is still resident. On `gpu_24gb`, `gemma3_4b` (~8.6 GB) plus `gemma2_9b` (~18.5 GB) exceeds 24 GB. The bf16-vector transfer path in steering also holds two copies. | `registry.py:211`, `steering/tomography.py:203,232`, `steering/method.py:122` | Reproduced (weakref still alive after `free_model`) | Partly fixed (`c2b6fd1`) |
@@ -192,7 +192,7 @@ These are real and worth fixing, but each has limited scope, is partly mitigated
 
 **Status notes for the partly fixed and fixed Medium items:**
 
-- **M1 — fixed (uncommitted).**
+- **M1 — fixed in `c2410b0` + `ecc51b8`.**
   - **Build record:** `build_dataset` now writes `data/processed/build_meta.json`. It records a fingerprint of the data spec, the data-building code, the synth prompt templates, the teacher and the pair filter, plus a digest of the parquet files. The code is every `minorsafe.data` module reachable from `build`, plus the pair filter's refusal and toxicity code and teacher decoding, hashed with comments and docstrings ignored.
   - **`minorsafe data status`:** compares that record with what the current checkout would build. It exits with code 3 when the data is missing, stale, or has no record, as with data built before this change.
   - **Autopilot:** `run_autopilot.sh` uses that check instead of testing whether the file exists. If results built from the old data exist (`results/runs`, `results/tomography`), it stops. `--rebuild-data` moves those results to `results/stale_archive/` and rebuilds; `--keep-data` keeps the old dataset. Both flags pass through `remote.sh autopilot`, and `restart_remote.sh --keep-data` passes `--keep-data`.
@@ -201,7 +201,26 @@ These are real and worth fixing, but each has limited scope, is partly mitigated
   - **`minorsafe status`:** prints the dataset's freshness.
   - **Tests:** `tests/unit/test_data_provenance.py`. They include a sandboxed run of the real autopilot script; its three autopilot tests fail on the previous script.
   - **Not covered:** Hugging Face source rows are streamed without a pinned revision, so upstream dataset changes are not detected.
-- **M4 — fixed in `c2b6fd1`.** When the chat template already opened `<think>`, a completion that never closes it is counted entirely as reasoning, with an empty visible answer and `truncated=True`. Note that M3 (empty responses score as perfect) now applies to these cut-off answers.
+- **M2 — fixed (uncommitted).**
+  - **Parsing:** `parse_judge_json` accepts a verdict only when all four rubric scores are numbers in 1–5 (`"4"` is accepted and 4.5 rounds to 5) and `is_refusal` is a boolean (`"true"`/`"false"` are accepted). Anything partial, out of range or non-numeric is a parse failure, which triggers the judge's strict-prompt retry. The rationale names the bad fields.
+  - **When retries run out:** the scores are NaN instead of placeholders (previously 4 for a missing field, or 3 for unparseable output), `judge_parse_ok=False`, and `compute_success_flag` returns False for any row without valid scores.
+  - **Summary:** a new `judge_parse_fail_rate` column reports how often this happens.
+  - **Before/after on the audit's case:** `{"age_appropriate": 5}` was success=True and is now a parse failure with success=False. An out-of-range score of 9 was clamped to 5 and is now rejected.
+- **M3 — fixed (uncommitted).**
+  - **Definition:** a response with no words (empty, whitespace, or only punctuation/emoji; `utils.is_empty_response`) now gets `ppl`, `ppl_delta_pct`, `fk_grade`, `dale_chall` and `rare_word_ratio` = NaN, and `fk_compliant=False`. Previously these were 0.0, 0.0, 0.0, 0.0, 0.0 and True.
+  - **No baseline:** `ppl_delta_pct` is also NaN, not 0.0, whenever the M0 baseline PPL is missing (the same lines, `fluency.py:97,142`).
+  - **Judge:** empty responses are not sent to the LLM judge, and the heuristic judge doesn't score them either. Their judge scores are NaN with a fixed rationale.
+  - **Success:** `compute_success_flag(..., empty=True)` is always False. A new `is_empty` column and the `empty_response_rate` summary column keep collapse visible, since the NaN metrics drop out of means.
+  - **Summary step:** an all-NaN metric now stays NaN (`fk_grade_mean`, `fk_compliant_rate`, `ppl_delta_pct_mean`, `judge_age_appropriate_mean`) instead of becoming 0.0, which would have fed H7 a fake 0% PPL change. Rows with NaN are now dropped together with their example cluster, so the bootstrap CI stays clustered (before, any NaN silently switched it to an unclustered bootstrap).
+  - **Steering sweep:**
+    - A candidate's empty outputs count as failures.
+    - Its mean PPL change covers only examples where both sides are defined, and it is infeasible when that mean is undefined.
+    - It is also infeasible when it produces more empty outputs than the unsteered model (`dev_empty_rate`).
+    - The cache key now includes the scoring version, so sweeps chosen under the old scoring are not reused.
+    - Before/after: an all-empty candidate scored (success 1.0, ΔPPL 0.0) and would have won the sweep. It now scores (0.0, NaN, empty rate 1.0).
+  - **H2:** it still compares mean PPL over responses that have one. Collapse shows up in `repetition_rate` (1.0 for empty responses) and `empty_response_rate`.
+- **Tests:** `tests/unit/test_unscored_responses.py`. Two existing tests that asserted the old placeholder fallback (`1 <= age <= 5`, `age == 3`) now assert NaN.
+- **M4 — fixed in `c2b6fd1`.** When the chat template already opened `<think>`, a completion that never closes it is counted entirely as reasoning, with an empty visible answer and `truncated=True`. These cut-off answers are empty, so M3 applied to them. M3 is now fixed, so they count as failures with NaN quality metrics.
 - **M6 — partly fixed in `c2b6fd1`.** The steering bf16 vector-transfer path releases the quantized generator before loading the bf16 copy, and reloads it afterwards. `free_model()` itself and the tomography loop are unchanged.
 - **M7 — partly fixed in `c2b6fd1`.** The sweep, steering-vector, LoRA and encoder cache keys now include every method setting that changes the artifact: quant, concepts, pooling, learning rate, seed and so on. They still contain no dataset hash. Since the M1 fix, the autopilot moves `results/runs` (including `_artifacts`) aside before it rebuilds data. A manual `data build` followed by a run still reuses cached artifacts, although run shards themselves are protected.
 

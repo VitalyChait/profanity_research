@@ -9,6 +9,32 @@ import torch
 from minorsafe.registry import compute_dtype, default_device, free_model
 from minorsafe.utils import normalize_text
 
+_NAN = float("nan")
+
+
+def _empty_fluency() -> dict:
+    """A response with no words has no perplexity (NaN, never a perfect 0.0) and counts as fully degenerate."""
+    return {
+        "ppl": _NAN,
+        "ppl_delta_pct": _NAN,
+        "distinct_1": 0.0,
+        "distinct_2": 0.0,
+        "repetition_rate": 1.0,
+    }
+
+
+def ppl_delta_pct(ppl: float, baseline_ppl: float | None) -> float:
+    """Relative PPL change vs the M0 baseline in %; NaN when either side is undefined (never 0.0)."""
+    if (
+        baseline_ppl is None
+        or not math.isfinite(baseline_ppl)
+        or baseline_ppl <= 0
+        or ppl is None
+        or not math.isfinite(ppl)
+    ):
+        return _NAN
+    return (ppl - baseline_ppl) / baseline_ppl * 100.0
+
 
 def _ngram_stats(text: str) -> tuple[float, float, float]:
     toks = normalize_text(text or "").split()
@@ -76,13 +102,7 @@ def compute_fluency_metrics(
 ) -> dict:
     toks = normalize_text(text or "").split()
     if not toks:
-        return {
-            "ppl": 0.0,
-            "ppl_delta_pct": 0.0,
-            "distinct_1": 0.0,
-            "distinct_2": 0.0,
-            "repetition_rate": 1.0,
-        }
+        return _empty_fluency()
 
     distinct_1, distinct_2, rep_rate = _ngram_stats(text)
     if ppl_model:
@@ -91,14 +111,9 @@ def compute_fluency_metrics(
         # Heuristic perplexity estimate when reference LM is disabled (cpu_debug)
         ppl = 15.0 * math.exp(2.2 * rep_rate) / max(0.25, distinct_2)
 
-    if baseline_ppl and math.isfinite(baseline_ppl) and baseline_ppl > 0 and math.isfinite(ppl):
-        ppl_delta = (ppl - baseline_ppl) / baseline_ppl * 100.0
-    else:
-        ppl_delta = 0.0
-
     return {
         "ppl": float(ppl),
-        "ppl_delta_pct": float(ppl_delta),
+        "ppl_delta_pct": float(ppl_delta_pct(ppl, baseline_ppl)),
         "distinct_1": float(distinct_1),
         "distinct_2": float(distinct_2),
         "repetition_rate": float(rep_rate),
@@ -124,26 +139,14 @@ def compute_fluency_metrics_batch(
     for txt, ppl_val, b_ppl in zip(texts, ppls, b_list, strict=True):
         toks = normalize_text(txt or "").split()
         if not toks:
-            out.append(
-                {
-                    "ppl": 0.0,
-                    "ppl_delta_pct": 0.0,
-                    "distinct_1": 0.0,
-                    "distinct_2": 0.0,
-                    "repetition_rate": 1.0,
-                }
-            )
+            out.append(_empty_fluency())
             continue
         d1, d2, rep = _ngram_stats(txt)
         ppl = float(ppl_val) if ppl_val is not None else (15.0 * math.exp(2.2 * rep) / max(0.25, d2))
-        if b_ppl is not None and math.isfinite(b_ppl) and b_ppl > 0 and math.isfinite(ppl):
-            delta = (ppl - b_ppl) / b_ppl * 100.0
-        else:
-            delta = 0.0
         out.append(
             {
                 "ppl": float(ppl),
-                "ppl_delta_pct": float(delta),
+                "ppl_delta_pct": float(ppl_delta_pct(ppl, b_ppl)),
                 "distinct_1": float(d1),
                 "distinct_2": float(d2),
                 "repetition_rate": float(rep),

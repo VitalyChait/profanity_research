@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -187,7 +188,8 @@ def test_judge_parsing_and_150_human_agreement(tmp_path: Path):
     bad_raw = "Completely unparseable output"
     fallback, ok_bad = parse_judge_json(bad_raw)
     assert ok_bad is False
-    assert 1 <= fallback["age_appropriate"] <= 5
+    # No placeholder scores (claude_issues_found.md M2): an unparseable verdict carries NaN.
+    assert math.isnan(fallback["age_appropriate"])
 
     # Build a 200-row synthetic responses table and export 150 blinded human evaluation rows
     rows = []
